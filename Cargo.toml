@@ -1,0 +1,44 @@
+[package]
+name = "babyjubjub-ec"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0"
+description = "BabyJubJub elliptic curve implementation wrapped in elliptic-curve traits"
+repository = "https://github.com/hoprnet/babyjubjub-ec"
+readme = "README.md"
+
+[dependencies]
+# Use ark-babyjubjub as the backend implementation
+taceo-ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5.3" }
+# ark-ff for field traits (needed for BackendScalar operations)
+ark-ff = { version = "0.5", default-features = false }
+# elliptic-curve traits
+elliptic-curve = { version = "0.14.0-rc.32", default-features = false }
+# group crate for core group traits
+group = { version = "0.13", default-features = false, features = ["rand"] }
+# Scalar field operations
+ff = { version = "0.13", default-features = false }
+# Subtle operations
+subtle = { version = "2.6", default-features = false }
+# Zeroize
+zeroize = { version = "1.8", default-features = false }
+# Random number generation
+rand_core = { version = "0.6", default-features = false }
+# num-traits for Zero and One traits
+num-traits = { version = "0.2", default-features = false }
+
+[features]
+default = ["std"]
+std = [
+    "taceo-ark-babyjubjub/std",
+    "elliptic-curve/std",
+    "ff/std",
+]
+
+[dev-dependencies]
+rand = { version = "0.8", default-features = false }
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "scalar_mult"
+harness = false
