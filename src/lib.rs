@@ -23,7 +23,7 @@ pub use taceo_ark_babyjubjub::Fr as BackendScalar;
 // ===== Import required traits for BackendScalar operations =====
 use ark_ff::{
     fields::{AdditiveGroup, Field as ArkField, PrimeField as ArkPrimeField},
-    BigInt, BigInteger, UniformRand,
+    BigInteger, UniformRand,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use elliptic_curve::{Curve, FieldBytesEncoding, PrimeCurve};
@@ -45,6 +45,7 @@ impl Curve for BabyJubJub {
     type FieldBytesSize = elliptic_curve::consts::U32;
     type Uint = elliptic_curve::bigint::U256;
 
+    /// Order of the BabyJubJub scalar field (from backend)
     const ORDER: elliptic_curve::bigint::Odd<Self::Uint> =
         elliptic_curve::bigint::Odd::from_be_hex(ORDER_HEX);
 }
@@ -70,20 +71,10 @@ impl AffinePoint {
         y: BackendBaseField::ONE,
     };
 
-    /// Generator point (x, y coordinates from BabyJubJub spec)
+    /// Generator point from backend (via GENERATOR_X and GENERATOR_Y constants)
     pub const GENERATOR: Self = Self {
-        x: BackendBaseField::new_unchecked(BigInt([
-            0xa8fc7bc1a89fa86,
-            0xa7d9d786e9e48627,
-            0xee6158b465bea369,
-            0x14a0ff6d2f874519,
-        ])),
-        y: BackendBaseField::new_unchecked(BigInt([
-            0xb83342d20d0201aa,
-            0x2ffef2f7cdcfeac7,
-            0xbfa79a9425a6e625,
-            0xdfb859dc3a44b70,
-        ])),
+        x: taceo_ark_babyjubjub::GENERATOR_X,
+        y: taceo_ark_babyjubjub::GENERATOR_Y,
     };
 
     /// Create a new affine point from coordinates
@@ -135,23 +126,13 @@ impl ProjectivePoint {
         z: BackendBaseField::ONE,
     };
 
-    /// Generator point (x, y from BabyJubJub spec)
-    /// GENERATOR_X = 5299619240641551281634865583518297030282874472190772894086521144482721001553
-    /// GENERATOR_Y = 16950150798460657717958625567821834550301663161624707787222815936182638968203
-    pub const GENERATOR: Self = Self {
-        x: BackendBaseField::new_unchecked(BigInt([
-            0xa8fc7bc1a89fa86,
-            0xa7d9d786e9e48627,
-            0xee6158b465bea369,
-            0x14a0ff6d2f874519,
-        ])),
-        y: BackendBaseField::new_unchecked(BigInt([
-            0xb83342d20d0201aa,
-            0x2ffef2f7cdcfeac7,
-            0xbfa79a9425a6e625,
-            0xdfb859dc3a44b70,
-        ])),
-        z: BackendBaseField::ONE,
+    /// Generator point from backend (converted to projective coordinates)
+    pub const GENERATOR: Self = {
+        Self {
+            x: taceo_ark_babyjubjub::GENERATOR_X,
+            y: taceo_ark_babyjubjub::GENERATOR_Y,
+            z: BackendBaseField::ONE,
+        }
     };
 
     /// Create a new projective point from coordinates
@@ -677,7 +658,7 @@ impl PrimeField for Scalar {
     const NUM_BITS: u32 = 255;
     const CAPACITY: u32 = 254;
 
-    const MODULUS: &'static str = ORDER_HEX;
+    const MODULUS: &'static str = "060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f1";
 
     // Pre-computed values for BabyJubJub scalar field (Montgomery representation)
     const TWO_INV: Self = Self(BackendScalar::new_unchecked(ark_ff::BigInt([
