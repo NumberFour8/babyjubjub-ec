@@ -9,6 +9,8 @@ readme = "README.md"
 
 [dependencies]
 # Use ark-babyjubjub as the backend implementation
+# Note: taceo-ark-babyjubjub v0.5.3 depends on ark-ff 0.5.x, ark-ec 0.5.x, and ark-serialize 0.5.x
+# We keep ark-* dependencies at 0.5 to match the backend crate's requirements
 taceo-ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5.3" }
 # ark-ff for field traits (needed for BackendScalar operations)
 ark-ff = { version = "0.5", default-features = false }
