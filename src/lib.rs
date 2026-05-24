@@ -347,7 +347,7 @@ impl GroupEncoding for ProjectivePoint {
         // This uses compressed format (32 bytes for y + 1 byte for flags)
         let mut bytes = [0u8; 33];
         backend_affine
-            .serialize_with_mode(&mut bytes.as_mut(), Compress::Yes)
+            .serialize_with_mode(bytes.as_mut(), Compress::Yes)
             .expect("serialization to 33 bytes should succeed");
 
         GroupRepr(bytes)
