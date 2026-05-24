@@ -658,7 +658,8 @@ impl PrimeField for Scalar {
     const NUM_BITS: u32 = 255;
     const CAPACITY: u32 = 254;
 
-    const MODULUS: &'static str = "060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f1";
+    const MODULUS: &'static str =
+        "060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f1";
 
     // Pre-computed values for BabyJubJub scalar field (Montgomery representation)
     const TWO_INV: Self = Self(BackendScalar::new_unchecked(ark_ff::BigInt([
