@@ -162,16 +162,16 @@ This crate is a thin wrapper over the arkworks backend. Please note:
   scalar-dependent control flow in this wrapper, but still calls backend group
   operations and must not be treated as an end-to-end constant-time primitive.
 - **Validation.** `ProjectivePoint::from_bytes` validates on-curve and
-  prime-order-subgroup membership. The raw constructors `AffinePoint::new` /
-  `ProjectivePoint::new` and `from_bytes_unchecked` do **not**; for untrusted
-  coordinates use `AffinePoint::new_checked` or the `is_on_curve` /
+  prime-order-subgroup membership. The raw constructors `AffinePoint::new_unchecked` /
+  `ProjectivePoint::new_unchecked` and `from_bytes_unchecked` do **not**; for untrusted
+  coordinates use `AffinePoint::new` or the `is_on_curve` /
   `is_in_prime_order_subgroup` helpers.
 - **Canonical encodings.** Scalar decoding (`from_bytes`, `from_repr`) rejects
   non-canonical values `>= r`, and the point encoding is a canonical 32 bytes,
   preventing scalar/point malleability. Use `Scalar::reduce_bytes_be` when
   modular reduction is explicitly desired.
 - **Zeroization.** `Scalar` is `Copy`, so it cannot auto-zeroize on drop; wipe
-  secret storage yourself (the type implements `Zeroize`).
+  secret storage yourself (the type implements `Zeroize` via `DefaultIsZeroes`).
 
 ## License
 
