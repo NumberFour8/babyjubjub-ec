@@ -28,7 +28,10 @@ zeroize = { version = "1.8", default-features = false }
 rand_core = { version = "0.6", default-features = false }
 # num-traits for Zero and One traits
 num-traits = { version = "0.2", default-features = false }
-ark-ec = "0.5"
+# `default-features = false` so the dependency tree stays `no_std`-compatible
+# (the previous `ark-ec = "0.5"` pulled in `std` unconditionally, which broke
+# `--no-default-features` builds).
+ark-ec = { version = "0.5", default-features = false }
 ark-serialize = { version = "0.5", default-features = false }
 
 [features]
@@ -37,6 +40,9 @@ std = [
     "taceo-ark-babyjubjub/std",
     "elliptic-curve/std",
     "ff/std",
+    "ark-ff/std",
+    "ark-ec/std",
+    "ark-serialize/std",
 ]
 
 [dev-dependencies]

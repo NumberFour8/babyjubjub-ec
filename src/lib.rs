@@ -2,6 +2,35 @@
 //!
 //! This crate provides a wrapper around the `taceo-ark-babyjubjub` crate that implements
 //! the BabyJubJub curve in a way compatible with the `elliptic-curve` crate traits.
+//!
+//! BabyJubJub is a cofactor-8 twisted Edwards curve defined over the 254-bit prime
+//! field `Fq`; its prime-order subgroup has a 251-bit scalar field `Fr` ([`Scalar`]).
+//!
+//! # Security
+//!
+//! - **Side channels / constant-time.** Most arithmetic is delegated to the
+//!   arkworks backend, which is *not* guaranteed constant-time. In particular
+//!   the `Mul<Scalar>` operators on [`ProjectivePoint`], [`Scalar::invert`] and
+//!   [`Scalar`]'s `sqrt`/`sqrt_ratio` are **variable-time** and can leak their
+//!   inputs through timing. [`ProjectivePoint::mul_fixed_schedule`] avoids
+//!   scalar-dependent control flow in this wrapper, but still calls backend
+//!   group operations and must not be treated as an end-to-end constant-time
+//!   primitive. `ConditionallySelectable` and `ct_eq` are constant-time.
+//! - **Validation.** Points decoded via [`GroupEncoding::from_bytes`] are
+//!   checked to be on-curve **and** in the prime-order subgroup. The raw
+//!   constructors [`AffinePoint::new`] / [`ProjectivePoint::new`] and
+//!   [`GroupEncoding::from_bytes_unchecked`] perform **no** such checks; prefer
+//!   [`AffinePoint::new_checked`] or the validation helpers
+//!   ([`AffinePoint::is_on_curve`], [`AffinePoint::is_in_prime_order_subgroup`])
+//!   for untrusted input.
+//! - **Canonical encodings.** [`Scalar::from_bytes`] / [`PrimeField::from_repr`]
+//!   reject non-canonical (`>= r`) scalar encodings, and the compressed point
+//!   encoding is a canonical 32 bytes; this avoids scalar/point malleability.
+//!   Use [`Scalar::reduce_bytes_be`] when modular reduction is explicitly wanted.
+//! - **Zeroization.** [`Scalar`] is `Copy` and therefore cannot implement
+//!   `ZeroizeOnDrop`; copies are not wiped automatically. Callers handling
+//!   secret scalars are responsible for zeroizing their own storage (the type
+//!   does implement `Zeroize` via `DefaultIsZeroes`).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(
@@ -22,8 +51,8 @@ pub use taceo_ark_babyjubjub::Fr as BackendScalar;
 
 // ===== Import required traits for BackendScalar operations =====
 use ark_ff::{
-    fields::{AdditiveGroup, Field as ArkField, PrimeField as ArkPrimeField},
-    BigInteger, UniformRand,
+    fields::{AdditiveGroup, FftField, Field as ArkField, PrimeField as ArkPrimeField},
+    UniformRand,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use elliptic_curve::{Curve, FieldBytesEncoding};
@@ -45,6 +74,12 @@ pub struct BabyJubJub;
 /// NOTE: This value is verified at compile time by tests to match the backend's
 /// `BackendScalar::MODULUS`. If the backend is updated, tests will catch any mismatch.
 const ORDER_HEX: &str = "060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f1";
+
+const SCALAR_MODULUS_LE: [u8; 32] = [
+    0xf1, 0x26, 0x21, 0x39, 0xdc, 0x97, 0x72, 0x67, 0x0a, 0xee, 0x20, 0x39, 0xb8, 0xed, 0x3e,
+    0xab, 0x0b, 0x2b, 0x30, 0xd0, 0xb6, 0x08, 0x0a, 0x37, 0x05, 0x34, 0x26, 0x5c, 0xce, 0x89,
+    0x0c, 0x06,
+];
 
 impl Curve for BabyJubJub {
     type FieldBytesSize = elliptic_curve::consts::U32;
@@ -80,9 +115,48 @@ impl AffinePoint {
         y: taceo_ark_babyjubjub::GENERATOR_Y,
     };
 
-    /// Create a new affine point from coordinates
+    /// Create a new affine point from raw coordinates **without any validation**.
+    ///
+    /// # Security
+    ///
+    /// This performs **no** on-curve or prime-order-subgroup checks. Feeding
+    /// attacker-controlled coordinates into curve arithmetic can lead to
+    /// invalid-curve and small-subgroup attacks. For untrusted input prefer
+    /// [`AffinePoint::new_checked`] (validates on-curve **and** subgroup
+    /// membership) or decode via [`ProjectivePoint::from_bytes`]. Use
+    /// [`AffinePoint::is_on_curve`] / [`AffinePoint::is_in_prime_order_subgroup`]
+    /// to validate a point obtained from this constructor.
     pub fn new(x: BackendBaseField, y: BackendBaseField) -> Self {
         Self { x, y }
+    }
+
+    /// Create a new affine point, returning `None` unless the coordinates are
+    /// on the curve **and** in the prime-order subgroup.
+    ///
+    /// This is the safe constructor to use for untrusted `(x, y)` pairs.
+    pub fn new_checked(x: BackendBaseField, y: BackendBaseField) -> Option<Self> {
+        let p = Self { x, y };
+        if p.is_in_prime_order_subgroup() {
+            Some(p)
+        } else {
+            None
+        }
+    }
+
+    /// Returns true iff `(x, y)` satisfies the twisted Edwards curve equation.
+    ///
+    /// Note: being on the curve does **not** imply membership in the prime-order
+    /// subgroup (BabyJubJub has cofactor 8); use
+    /// [`AffinePoint::is_in_prime_order_subgroup`] for the stronger check.
+    pub fn is_on_curve(&self) -> bool {
+        BackendAffine::new_unchecked(self.x, self.y).is_on_curve()
+    }
+
+    /// Returns true iff the point is on the curve **and** lies in the
+    /// prime-order subgroup of order [`BabyJubJub::ORDER`].
+    pub fn is_in_prime_order_subgroup(&self) -> bool {
+        let a = BackendAffine::new_unchecked(self.x, self.y);
+        a.is_on_curve() && a.is_in_correct_subgroup_assuming_on_curve()
     }
 
     /// Check if this point is the identity
@@ -100,12 +174,18 @@ impl AffinePoint {
         self.y
     }
 
-    /// Check if x-coordinate is odd (for compression)
-    /// For BabyJubJub, we use a simplified approach
+    /// Parity (least-significant bit) of the **canonical** x-coordinate.
+    ///
+    /// This is the RFC 8032 / EdDSA sign convention (LSB of `x`), which is
+    /// **not** the same convention used by the backend's compressed point
+    /// encoding (ark packs a `x > -x` "is-negative" flag into the spare high
+    /// bits of `y`). Do not use this value to hand-roll point compression that
+    /// must interoperate with [`ProjectivePoint::to_bytes`]; it is provided only
+    /// for callers that explicitly need x-parity. Allocation-free.
     pub fn x_is_odd(&self) -> subtle::Choice {
-        // Check the least significant bit of the first limb
-        let bytes = self.x.into_bigint().to_bytes_le();
-        subtle::Choice::from(bytes[0] & 1)
+        // LSB of the canonical (non-Montgomery) integer representation of x.
+        let limbs = self.x.into_bigint().0;
+        subtle::Choice::from((limbs[0] & 1) as u8)
     }
 }
 
@@ -143,9 +223,78 @@ impl ProjectivePoint {
         Self { x, y, z }
     }
 
-    /// Check if this point is the identity
+    /// Check if this point is the identity (neutral element).
+    ///
+    /// BabyJubJub is a (complete) twisted Edwards curve, so there is **no**
+    /// point at infinity: the neutral element is the affine point `(0, 1)`,
+    /// which in projective coordinates is `(0 : Y : Z)` with `Y == Z` (e.g.
+    /// [`ProjectivePoint::IDENTITY`] is `(0, 1, 1)`). Testing `z == 0` — as a
+    /// short Weierstrass implementation would — is therefore wrong and never
+    /// matches a real identity produced by this API.
     pub fn is_identity(&self) -> bool {
-        self.z.is_zero()
+        !self.z.is_zero() && self.x.is_zero() && self.y == self.z
+    }
+
+    /// Returns true iff the point is on the curve **and** in the prime-order
+    /// subgroup. See [`AffinePoint::is_in_prime_order_subgroup`].
+    pub fn is_in_prime_order_subgroup(&self) -> bool {
+        self.is_on_curve() && self.to_affine().is_in_prime_order_subgroup()
+    }
+
+    /// Returns true iff the point satisfies the curve equation.
+    /// See [`AffinePoint::is_on_curve`].
+    pub fn is_on_curve(&self) -> bool {
+        if self.z.is_zero() {
+            return false;
+        }
+
+        // Validate the projective equation directly before any affine
+        // conversion. For projective `(X : Y : Z)` representing affine
+        // `(X/Z, Y/Z)`, BabyJubJub's Edwards equation
+        // `a*x^2 + y^2 = 1 + d*x^2*y^2` becomes:
+        // `(a*X^2 + Y^2)*Z^2 = Z^4 + d*X^2*Y^2`.
+        let x2 = self.x.square();
+        let y2 = self.y.square();
+        let z2 = self.z.square();
+        let a = BackendBaseField::from(168700u64);
+        let d = BackendBaseField::from(168696u64);
+        (a * x2 + y2) * z2 == z2.square() + d * x2 * y2
+    }
+
+    /// Fixed-schedule scalar multiplication `[scalar] * self`.
+    ///
+    /// This routine always performs 256 iterations and uses a constant-time
+    /// conditional select for every bit, avoiding scalar-dependent loop length
+    /// and branches in this wrapper.
+    ///
+    /// # Timing
+    ///
+    /// This is **not** an end-to-end constant-time scalar multiplication
+    /// guarantee: each iteration still calls the arkworks backend's point
+    /// addition and doubling routines, whose field/group arithmetic is not
+    /// guaranteed constant-time by this crate.
+    pub fn mul_fixed_schedule(&self, scalar: &Scalar) -> Self {
+        // Canonical little-endian bytes of the scalar (< r < 2^252).
+        let bytes = scalar.to_bytes_le();
+        let mut acc = Self::IDENTITY;
+        // Fixed 256 iterations, MSB-first, regardless of the scalar value.
+        for i in (0..256usize).rev() {
+            let doubled = Group::double(&acc);
+            let sum = doubled + *self;
+            let bit = (bytes[i >> 3] >> (i & 7)) & 1;
+            acc = Self::conditional_select(&doubled, &sum, subtle::Choice::from(bit));
+        }
+        acc
+    }
+
+    /// Compatibility alias for [`ProjectivePoint::mul_fixed_schedule`].
+    ///
+    /// Despite the historical `ct` suffix, this method is **not** guaranteed to
+    /// be end-to-end constant-time because it still uses backend point addition
+    /// and doubling internally. Prefer [`ProjectivePoint::mul_fixed_schedule`]
+    /// when referring to its actual timing properties.
+    pub fn mul_ct(&self, scalar: &Scalar) -> Self {
+        self.mul_fixed_schedule(scalar)
     }
 
     /// Convert to affine coordinates.
@@ -179,34 +328,79 @@ impl Scalar {
     /// One scalar
     pub const ONE: Self = Self(BackendScalar::ONE);
 
-    /// Create a scalar from bytes (big-endian)
+    /// Create a scalar from a **canonical** big-endian byte encoding.
+    ///
+    /// # Security
+    ///
+    /// Returns `CtOption::none()` if `bytes` encodes an integer `>= r` (the
+    /// scalar-field order). Rejecting non-canonical encodings prevents the
+    /// scalar/signature malleability that arises when distinct byte strings
+    /// (e.g. `s` and `s + r`) would otherwise silently reduce to the same
+    /// scalar. If you instead want modular reduction, use
+    /// [`Scalar::reduce_bytes_be`].
     pub fn from_bytes(bytes: &[u8; 32]) -> CtOption<Self> {
-        let mut le_bytes = *bytes;
-        le_bytes.reverse();
-        let scalar = BackendScalar::from_le_bytes_mod_order(&le_bytes);
-        CtOption::new(Self(scalar), 1.into())
+        let mut le = *bytes;
+        le.reverse();
+        Self::from_canonical_le(&le)
     }
 
-    /// Create a scalar from bytes (little-endian)
+    /// Create a scalar from a **canonical** little-endian byte encoding.
+    ///
+    /// See [`Scalar::from_bytes`] for the canonicity / security contract;
+    /// returns `CtOption::none()` for any value `>= r`.
     pub fn from_bytes_le(bytes: &[u8; 32]) -> CtOption<Self> {
-        let scalar = BackendScalar::from_le_bytes_mod_order(bytes);
-        CtOption::new(Self(scalar), 1.into())
+        Self::from_canonical_le(bytes)
     }
 
-    /// Convert to bytes (little-endian)
+    /// Reduce an arbitrary big-endian 32-byte value modulo `r`.
+    ///
+    /// Unlike [`Scalar::from_bytes`] this never fails and is **not** canonical:
+    /// inputs `>= r` are reduced. Use only where modular reduction is the
+    /// intended behaviour — never when decoding signatures or other values that
+    /// must round-trip canonically.
+    pub fn reduce_bytes_be(bytes: &[u8; 32]) -> Self {
+        let mut le = *bytes;
+        le.reverse();
+        Self(BackendScalar::from_le_bytes_mod_order(&le))
+    }
+
+    /// Reduce an arbitrary little-endian 32-byte value modulo `r`.
+    /// See [`Scalar::reduce_bytes_be`].
+    pub fn reduce_bytes_le(bytes: &[u8; 32]) -> Self {
+        Self(BackendScalar::from_le_bytes_mod_order(bytes))
+    }
+
+    /// Build a scalar from canonical little-endian bytes, rejecting any value
+    /// `>= r`. Backs [`Scalar::from_bytes`] / [`Scalar::from_bytes_le`].
+    fn from_canonical_le(bytes: &[u8; 32]) -> CtOption<Self> {
+        let value = BackendScalar::from_le_bytes_mod_order(bytes);
+        CtOption::new(Self(value), Self::is_canonical_le(bytes))
+    }
+
+    fn is_canonical_le(bytes: &[u8; 32]) -> subtle::Choice {
+        let mut borrow = 0u16;
+        for (&a, &b) in bytes.iter().zip(SCALAR_MODULUS_LE.iter()) {
+            let diff = (a as u16).wrapping_sub(b as u16).wrapping_sub(borrow);
+            borrow = diff >> 15;
+        }
+        subtle::Choice::from(borrow as u8)
+    }
+
+    /// Convert to bytes (little-endian). Allocation-free.
     pub fn to_bytes_le(&self) -> [u8; 32] {
-        let bytes = self.0.into_bigint().to_bytes_le();
+        let limbs = self.0.into_bigint().0;
         let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
+        for (i, limb) in limbs.iter().enumerate() {
+            arr[i * 8..i * 8 + 8].copy_from_slice(&limb.to_le_bytes());
+        }
         arr
     }
 
-    /// Convert to bytes (big-endian)
+    /// Convert to bytes (big-endian). Allocation-free.
     pub fn to_bytes(&self) -> [u8; 32] {
-        let le_bytes = self.to_bytes_le();
-        let mut be_bytes = [0u8; 32];
-        be_bytes.copy_from_slice(&le_bytes.iter().rev().cloned().collect::<Vec<u8>>());
-        be_bytes
+        let mut be = self.to_bytes_le();
+        be.reverse();
+        be
     }
 
     /// Check if scalar is zero
@@ -272,9 +466,11 @@ impl Group for ProjectivePoint {
     }
 
     fn is_identity(&self) -> subtle::Choice {
-        // BackendScalar::is_zero returns bool, convert to subtle::Choice
+        // Twisted Edwards has no point at infinity: the neutral element is the
+        // affine point (0, 1), i.e. projective (0 : Y : Z) with Y == Z. Testing
+        // `z == 0` (a short-Weierstrass habit) never matches a real identity.
         use subtle::Choice;
-        if self.z.is_zero() {
+        if !self.z.is_zero() && self.x.is_zero() && self.y == self.z {
             Choice::from(1)
         } else {
             Choice::from(0)
@@ -323,13 +519,20 @@ impl DefaultIsZeroes for ProjectivePoint {}
 
 // ===== GroupEncoding trait implementations =====
 
-/// Wrapper around [u8; 33] for GroupEncoding
+/// Canonical compressed encoding of a [`ProjectivePoint`].
+///
+/// This is exactly **32 bytes**, matching the arkworks BabyJubJub compressed
+/// serialization (little-endian `y` with the x-sign flag packed into the spare
+/// high bits of the last byte). A previous version used 33 bytes with an unused
+/// trailing byte, which made the encoding non-canonical and malleable (256
+/// distinct byte strings decoded to the same point); the extra byte has been
+/// removed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GroupRepr(pub [u8; 33]);
+pub struct GroupRepr(pub [u8; 32]);
 
 impl Default for GroupRepr {
     fn default() -> Self {
-        GroupRepr([0u8; 33])
+        GroupRepr([0u8; 32])
     }
 }
 
@@ -361,12 +564,13 @@ impl GroupEncoding for ProjectivePoint {
         let backend_proj: BackendProjective = (*self).into();
         let backend_affine = BackendAffine::from(backend_proj);
 
-        // Serialize the affine point using the backend's CanonicalSerialize
-        // This uses compressed format (32 bytes for y + 1 byte for flags)
-        let mut bytes = [0u8; 33];
+        // Serialize the affine point using the backend's CanonicalSerialize.
+        // The compressed format is exactly 32 bytes (little-endian y with the
+        // x-sign flag in the spare high bits of the final byte).
+        let mut bytes = [0u8; 32];
         backend_affine
             .serialize_with_mode(bytes.as_mut(), Compress::Yes)
-            .expect("serialization to 33 bytes should succeed");
+            .expect("serialization to 32 bytes should succeed");
 
         GroupRepr(bytes)
     }
@@ -375,7 +579,7 @@ impl GroupEncoding for ProjectivePoint {
 impl ProjectivePoint {
     /// Internal implementation of from_bytes and from_bytes_unchecked
     /// When validate is true, checks that the point is on the curve and in the correct subgroup
-    fn from_bytes_impl(bytes: &[u8; 33], validate: bool) -> CtOption<Self> {
+    fn from_bytes_impl(bytes: &[u8; 32], validate: bool) -> CtOption<Self> {
         // Use the backend's deserialization which properly handles Montgomery form
         let mut reader = bytes.as_ref();
         let backend_affine = match BackendAffine::deserialize_with_mode(
@@ -513,6 +717,16 @@ impl core::ops::Neg for &ProjectivePoint {
 impl<'a> core::ops::Mul<&'a Scalar> for &ProjectivePoint {
     type Output = ProjectivePoint;
 
+    /// Scalar multiplication `point * scalar`.
+    ///
+    /// # Security
+    ///
+    /// **Variable-time.** This (and all other `Mul<Scalar>` operator impls)
+    /// delegates to the arkworks backend, whose scalar multiplication is not
+    /// constant-time and can leak the scalar through timing/cache side channels.
+    /// [`ProjectivePoint::mul_fixed_schedule`] avoids scalar-dependent control
+    /// flow in this wrapper, but it still relies on backend group operations and
+    /// is not an end-to-end constant-time guarantee.
     fn mul(self, scalar: &'a Scalar) -> ProjectivePoint {
         let backend_self = BackendProjective::from(*self);
         let result = backend_self * scalar.0;
@@ -615,11 +829,10 @@ impl<'a> From<&'a ProjectivePoint> for BackendProjective {
 
 impl<'a> From<&'a BackendProjective> for ProjectivePoint {
     fn from(backend: &'a BackendProjective) -> Self {
-        Self {
-            x: backend.x,
-            y: backend.y,
-            z: backend.z,
-        }
+        // Delegate to the owned impl so the identity is normalized to (0, 1, 1)
+        // consistently (an un-normalized identity would otherwise break
+        // `is_identity` and equality checks).
+        (*backend).into()
     }
 }
 
@@ -653,15 +866,17 @@ impl DefaultIsZeroes for AffinePoint {}
 impl PrimeField for Scalar {
     type Repr = [u8; 32];
 
+    /// Decode a canonical **little-endian** scalar, matching the encoding
+    /// produced by [`PrimeField::to_repr`]. Per the `ff` contract this rejects
+    /// non-canonical inputs (any value `>= r`) by returning `CtOption::none()`.
     fn from_repr(bytes: [u8; 32]) -> CtOption<Self> {
-        Self::from_bytes(&bytes)
+        // NOTE: `to_repr` is little-endian, so `from_repr` must be too.
+        Self::from_bytes_le(&bytes)
     }
 
     fn from_repr_vartime(bytes: [u8; 32]) -> Option<Self> {
-        let mut le_bytes = bytes;
-        le_bytes.reverse();
-        let scalar = BackendScalar::from_le_bytes_mod_order(&le_bytes);
-        Some(Self(scalar))
+        // Same canonical little-endian decoding as `from_repr`; rejects `>= r`.
+        Self::from_bytes_le(&bytes).into()
     }
 
     fn to_repr(&self) -> [u8; 32] {
@@ -673,8 +888,10 @@ impl PrimeField for Scalar {
         (bytes[0] & 1).into()
     }
 
-    const NUM_BITS: u32 = 255;
-    const CAPACITY: u32 = 254;
+    // The scalar-field modulus r is 251 bits, so a field element needs 251 bits
+    // and at most 250 bits of arbitrary data can be stored without reduction.
+    const NUM_BITS: u32 = 251;
+    const CAPACITY: u32 = 250;
 
     const MODULUS: &'static str =
         "060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f1";
@@ -687,39 +904,38 @@ impl PrimeField for Scalar {
         0xf8b21270ddbb92,
     ])));
 
-    // Multiplicative generator of the scalar field (value 5 in Montgomery representation)
-    const MULTIPLICATIVE_GENERATOR: Self = Self(BackendScalar::new_unchecked(ark_ff::BigInt([
-        0xbc8cd57ce9ace75d,
-        0xdb221128e9dbcd6c,
-        0xa2bad152684c8561,
-        0x3aa6aea0c831fb3,
-    ])));
+    // Multiplicative generator of the scalar field, taken directly from the
+    // backend's vetted `FftField::GENERATOR` (a quadratic non-residue and a
+    // generator of the full multiplicative group, and the value used to derive
+    // ROOT_OF_UNITY — as required by the `ff` contract). The previous hardcoded
+    // value `5` is a quadratic *residue* mod r, hence an INVALID generator.
+    const MULTIPLICATIVE_GENERATOR: Self = Self(BackendScalar::GENERATOR);
 
-    // S = 4 because r - 1 = 2^4 * s
+    // S = 4 because r - 1 = 2^4 * t with t odd (== BackendScalar::TWO_ADICITY).
     const S: u32 = 4;
 
-    // 4th root of unity (Montgomery representation)
-    const ROOT_OF_UNITY: Self = Self(BackendScalar::new_unchecked(ark_ff::BigInt([
-        0x994bd877e354bab9,
-        0xc8510f1914853981,
-        0x1331ad7e5fe0eaab,
-        0x28e1f7701a0a1c1,
-    ])));
+    // The 2^S-th root of unity, taken directly from the backend so it is
+    // guaranteed to equal MULTIPLICATIVE_GENERATOR^t and to be a *primitive*
+    // 2^S root of unity. (The previous hardcoded value was not a root of unity
+    // of Fr at all — it broke FFTs, the default `sqrt`, and `sqrt_ratio`.)
+    const ROOT_OF_UNITY: Self = Self(BackendScalar::TWO_ADIC_ROOT_OF_UNITY);
 
-    // Inverse of the root of unity (Montgomery representation)
+    // Inverse of ROOT_OF_UNITY (Montgomery form). Verified by tests:
+    // ROOT_OF_UNITY * ROOT_OF_UNITY_INV == ONE.
     const ROOT_OF_UNITY_INV: Self = Self(BackendScalar::new_unchecked(ark_ff::BigInt([
-        0xce26bf6455cc6c38,
-        0x70cfdef096b9b436,
-        0xbbcfe7d8dd7291e0,
-        0x37e6a575a859243,
+        0x3cd891231ce44036,
+        0x97c6d3222a9aac61,
+        0x22a59f417e5ba9ca,
+        0x0373acbf899c1a70,
     ])));
 
-    // Delta = (r - 1) / 2 (Montgomery representation)
+    // DELTA = MULTIPLICATIVE_GENERATOR^(2^S) (Montgomery form), per the `ff`
+    // contract. Verified by tests: DELTA == MULTIPLICATIVE_GENERATOR^(2^S).
     const DELTA: Self = Self(BackendScalar::new_unchecked(ark_ff::BigInt([
-        0x33b94bee1c909378,
-        0xd59f76dc1c907705,
-        0x9b85045b68181585,
-        0x30644e72e131a02,
+        0xffb1712417f98edb,
+        0x3c08c1257227dc15,
+        0x370087e6983b16f7,
+        0x0013ff20bb212fb7,
     ])));
 }
 
@@ -770,6 +986,13 @@ impl Field for Scalar {
         }
     }
 
+    /// Square root in the scalar field.
+    ///
+    /// # Security
+    ///
+    /// Variable-time: delegates to the backend's `sqrt` (a Tonelli–Shanks
+    /// variant) whose control flow depends on the input. Do not call on secret
+    /// values where timing is observable.
     fn sqrt(&self) -> CtOption<Self> {
         match self.0.sqrt() {
             Some(s) => CtOption::new(Self(s), 1.into()),
@@ -777,12 +1000,28 @@ impl Field for Scalar {
         }
     }
 
-    fn sqrt_ratio(_num: &Self, _den: &Self) -> (subtle::Choice, Self) {
-        (subtle::Choice::from(1), Scalar::ONE)
+    /// Compute `sqrt(num / div)` following the `Field::sqrt_ratio` contract.
+    ///
+    /// Delegates to `ff`'s generic implementation, which is built on this
+    /// field's (now correct) `ROOT_OF_UNITY` and on the overridden `sqrt`
+    /// above (preventing the documented infinite recursion). Returns
+    /// `(1, sqrt(num/div))` when `num/div` is a square (and `(1, 0)` when
+    /// `num == 0`), and `(0, sqrt(ROOT_OF_UNITY * num/div))` for a non-square
+    /// (or `(0, 0)` when only `div == 0`).
+    ///
+    /// The previous implementation was a stub that unconditionally returned
+    /// `(1, 1)`, silently claiming every ratio was a square — which breaks any
+    /// hash-to-curve / quadratic-residue test built on it.
+    fn sqrt_ratio(num: &Self, div: &Self) -> (subtle::Choice, Self) {
+        group::ff::helpers::sqrt_ratio_generic(num, div)
     }
 }
 
-// Implement Sum and Product traits for ProjectivePoint
+// Implement Sum trait for ProjectivePoint.
+//
+// NOTE: `core::iter::Product` is intentionally NOT implemented for points:
+// there is no meaningful multiplication of two curve points, and the previous
+// impl silently returned IDENTITY for any input (a silent-wrong-result trap).
 impl core::iter::Sum for ProjectivePoint {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(ProjectivePoint::IDENTITY, |a, b| a + b)
@@ -792,18 +1031,6 @@ impl core::iter::Sum for ProjectivePoint {
 impl<'a> core::iter::Sum<&'a ProjectivePoint> for ProjectivePoint {
     fn sum<I: Iterator<Item = &'a ProjectivePoint>>(iter: I) -> Self {
         iter.cloned().sum()
-    }
-}
-
-impl core::iter::Product for ProjectivePoint {
-    fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(ProjectivePoint::IDENTITY, |_, _| ProjectivePoint::IDENTITY)
-    }
-}
-
-impl<'a> core::iter::Product<&'a ProjectivePoint> for ProjectivePoint {
-    fn product<I: Iterator<Item = &'a ProjectivePoint>>(iter: I) -> Self {
-        iter.cloned().product()
     }
 }
 
@@ -980,6 +1207,8 @@ impl Scalar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `to_bytes_be` / `num_bits` on the backend's `BigInt` come from this trait.
+    use ark_ff::BigInteger;
 
     /// Test that affine point operations match the backend implementation
     #[test]
@@ -1148,8 +1377,10 @@ mod tests {
             order_le[31 - i] = *b;
         }
 
-        // Use from_bytes_le since we already converted to little-endian
-        let order_scalar = Scalar::from_bytes_le(&order_le).unwrap();
+        // `r` is non-canonical as a scalar (it equals the modulus), so it is
+        // reduced: r mod r == 0. Hence [r]G == [0]G == identity.
+        let order_scalar = Scalar::reduce_bytes_le(&order_le);
+        assert!(order_scalar.is_zero());
         let result = ProjectivePoint::GENERATOR * order_scalar;
 
         assert_eq!(result, ProjectivePoint::IDENTITY);
@@ -1163,12 +1394,14 @@ mod tests {
         assert_eq!(result.0, Scalar::ONE.0);
     }
 
-    /// Test scalar field constant MULTIPLICATIVE_GENERATOR
+    /// Test scalar field constant MULTIPLICATIVE_GENERATOR is a non-residue.
     #[test]
     fn test_multiplicative_generator() {
-        // 5 is the multiplicative generator
-        let gen: Scalar = 5u64.into();
-        assert_eq!(gen.0, Scalar::MULTIPLICATIVE_GENERATOR.0);
+        // The generator must be a quadratic non-residue (and is NOT 5, which is
+        // a quadratic residue mod r and therefore an invalid generator).
+        let g = Scalar::MULTIPLICATIVE_GENERATOR.0;
+        assert_eq!(g.pow(BackendScalar::MODULUS_MINUS_ONE_DIV_TWO), -BackendScalar::ONE);
+        assert_ne!(g, Scalar::from(5u64).0);
     }
 
     /// Test constant time equality
@@ -1197,10 +1430,12 @@ mod tests {
             order_le[31 - i] = *b;
         }
 
-        // Use from_bytes_le since we already converted to little-endian
-        let order_scalar = Scalar::from_bytes_le(&order_le).unwrap();
+        // `r` is non-canonical as a scalar (it equals the modulus), so it is
+        // reduced: r mod r == 0.
+        let order_scalar = Scalar::reduce_bytes_le(&order_le);
+        assert!(order_scalar.is_zero());
 
-        // Test that order * G = identity
+        // Test that order * G = identity (== 0 * G).
         let result = ProjectivePoint::GENERATOR * order_scalar;
         assert_eq!(result, ProjectivePoint::IDENTITY);
 
@@ -1334,22 +1569,20 @@ mod tests {
         assert!(!not_one.is_one());
     }
 
-    /// Test GroupEncoding to_bytes
+    /// Test GroupEncoding to_bytes is the canonical 32-byte compressed encoding.
     #[test]
     fn test_group_encoding_to_bytes() {
         let point = ProjectivePoint::GENERATOR;
         let repr = point.to_bytes();
-        // Should be 33 bytes
-        assert_eq!(repr.as_ref().len(), 33);
+        assert_eq!(repr.as_ref().len(), 32);
     }
 
-    /// Test GroupEncoding from_bytes returns identity for invalid points
+    /// All-zero bytes decode to `y = 0`; any such on-curve point is 4-torsion
+    /// (not in the prime-order subgroup), so the validating decoder rejects it.
     #[test]
     fn test_group_encoding_from_bytes() {
-        let bytes = GroupRepr([0u8; 33]);
+        let bytes = GroupRepr([0u8; 32]);
         let result = ProjectivePoint::from_bytes(&bytes);
-        // Our implementation always returns identity for any input
-        // CtOption::is_none() returns Choice, so we use unwrap_u8()
         assert_eq!(result.is_none().unwrap_u8(), 1);
     }
 
@@ -1368,16 +1601,6 @@ mod tests {
         assert_eq!(sum.x, expected.x);
         assert_eq!(sum.y, expected.y);
         assert_eq!(sum.z, expected.z);
-    }
-
-    /// Test Product trait for ProjectivePoint
-    #[test]
-    fn test_projective_point_product() {
-        // Product of points with operator * is not meaningful, but test the trait
-        let points: Vec<ProjectivePoint> = vec![];
-        let product = points.into_iter().product::<ProjectivePoint>();
-        // Empty product should be identity
-        assert_eq!(product, ProjectivePoint::IDENTITY);
     }
 
     /// Test Sum trait for Scalar
@@ -1494,16 +1717,18 @@ mod tests {
         assert_eq!(scalar.0, Scalar::ONE.0);
     }
 
-    /// Test Scalar::from_repr_vartime
+    /// `from_repr_vartime` must be little-endian (matching `to_repr`) and reject
+    /// non-canonical (`>= r`) encodings.
     #[test]
     fn test_scalar_from_repr_vartime() {
-        // Use from_repr_vartime which expects big-endian bytes
         let mut bytes = [0u8; 32];
-        bytes[31] = 42; // 42 in big-endian
+        bytes[0] = 42; // 42 little-endian
         let scalar = Scalar::from_repr_vartime(bytes);
         assert!(scalar.is_some());
         let expected: Scalar = 42u64.into();
         assert_eq!(scalar.unwrap().0, expected.0);
+        // All-ones (= 2^256 - 1 >= r) is non-canonical and must be rejected.
+        assert!(Scalar::from_repr_vartime([0xFFu8; 32]).is_none());
     }
 
     /// Test Scalar::is_odd
@@ -1542,16 +1767,30 @@ mod tests {
         assert_eq!(squared.0, val.0);
     }
 
-    /// Test Scalar::sqrt_ratio - returns dummy value
+    /// `sqrt_ratio` must compute a real result per the `ff` contract (the old
+    /// implementation was a stub that always returned `(1, 1)`).
     #[test]
     fn test_scalar_sqrt_ratio() {
+        // 16/4 = 4 is a square: is_square == 1 and root^2 == num/den.
         let num: Scalar = 16u64.into();
         let den: Scalar = 4u64.into();
-        let (is_square, result) = Scalar::sqrt_ratio(&num, &den);
-        // sqrt_ratio returns a dummy value, just verify it doesn't panic
-        // and the result is non-zero
+        let (is_square, root) = Scalar::sqrt_ratio(&num, &den);
         assert_eq!(is_square.unwrap_u8(), 1);
-        assert_ne!(result.0, BackendScalar::ZERO);
+        let ratio = num * den.invert().unwrap();
+        assert_eq!(root.square().0, ratio.0, "root^2 must equal num/den");
+
+        // ROOT_OF_UNITY is a non-square, so its ratio over 1 is a non-square.
+        let (is_square_ns, _) = Scalar::sqrt_ratio(&Scalar::ROOT_OF_UNITY, &Scalar::ONE);
+        assert_eq!(is_square_ns.unwrap_u8(), 0, "a non-square must report is_square == 0");
+
+        // num != 0, den == 0 => (0, _).
+        let (is_square_d0, _) = Scalar::sqrt_ratio(&num, &Scalar::ZERO);
+        assert_eq!(is_square_d0.unwrap_u8(), 0);
+
+        // num == 0 => (1, 0).
+        let (is_square_n0, root_n0) = Scalar::sqrt_ratio(&Scalar::ZERO, &den);
+        assert_eq!(is_square_n0.unwrap_u8(), 1);
+        assert_eq!(root_n0.0, Scalar::ZERO.0);
     }
 
     /// Test Scalar::conditional_select
@@ -1578,11 +1817,11 @@ mod tests {
         assert_eq!(result.y, b.y);
     }
 
-    /// Test GroupRepr::default
+    /// Test GroupRepr::default (canonical 32-byte repr)
     #[test]
     fn test_group_repr_default() {
         let repr = GroupRepr::default();
-        assert_eq!(repr.as_ref(), &[0u8; 33]);
+        assert_eq!(repr.as_ref(), &[0u8; 32]);
     }
 
     /// Test BabyJubJub::ORDER constant matches the backend
@@ -1613,51 +1852,61 @@ mod tests {
         assert_eq!(order_bytes[0], 0x06);
     }
 
-    /// Test that hardcoded Montgomery constants are correct
+    /// Verify the `ff` field constants actually satisfy their mathematical
+    /// contracts (not merely "non-zero"). These checks pin down ROOT_OF_UNITY,
+    /// ROOT_OF_UNITY_INV, DELTA, MULTIPLICATIVE_GENERATOR and S against the
+    /// backend, so a wrong hardcoded value can never pass CI again.
     #[test]
     fn test_montgomery_constants() {
-        // Verify TWO_INV: 2 * TWO_INV = 1 in Montgomery form
-        // In Montgomery form: (2 * TWO_INV) mod r should equal 1
+        // 2 * TWO_INV == 1
         let two: Scalar = 2u64.into();
-        let two_inv_product = two * Scalar::TWO_INV;
-        assert_eq!(two_inv_product.0, Scalar::ONE.0, "TWO_INV is incorrect");
+        assert_eq!((two * Scalar::TWO_INV).0, Scalar::ONE.0, "TWO_INV wrong");
 
-        // Verify MULTIPLICATIVE_GENERATOR: should equal 5 in Montgomery form
-        let five: Scalar = 5u64.into();
+        // S must equal the backend's 2-adicity.
+        assert_eq!(Scalar::S, BackendScalar::TWO_ADICITY, "S != TWO_ADICITY");
+        assert_eq!(Scalar::S, 4);
+
+        let g = Scalar::MULTIPLICATIVE_GENERATOR.0;
+        let one = BackendScalar::ONE;
+
+        // MULTIPLICATIVE_GENERATOR must be a quadratic non-residue:
+        // g^((r-1)/2) == -1.
         assert_eq!(
-            five.0,
-            Scalar::MULTIPLICATIVE_GENERATOR.0,
-            "MULTIPLICATIVE_GENERATOR is incorrect"
+            g.pow(BackendScalar::MODULUS_MINUS_ONE_DIV_TWO),
+            -one,
+            "MULTIPLICATIVE_GENERATOR is not a quadratic non-residue"
         );
 
-        // Verify S: r - 1 = 2^S * s
-        // The value of S is 4 because r - 1 = 16 * s (where r is the modulus)
-        // This is a mathematical property of the BabyJubJub scalar field
-        assert_eq!(Scalar::S, 4, "S should be 4");
-
-        // Verify DELTA is correct: DELTA * 2 + 1 = r (mod r), so DELTA * 2 = r - 1
-        // In Montgomery form, verify 2*DELTA + 1 = R (the Montgomery factor)
-        // Since this is complex in Montgomery form, we verify DELTA is non-zero
-        assert_ne!(
-            Scalar::DELTA.0,
-            BackendScalar::ZERO,
-            "DELTA should be non-zero"
-        );
-
-        // Verify ROOT_OF_UNITY is a proper root of unity by checking that
-        // ROOT_OF_UNITY^(2^S) = 1 in the field
-        let mut power = Scalar::ROOT_OF_UNITY;
-        for _ in 0..Scalar::S {
-            power = power.square();
-        }
-        // After S squarings, we should get 1 (the definition of 2^S root of unity)
-        // Since we're in Montgomery form, we need to multiply by R to get result
-        // The important thing is the constant exists and is valid for field operations
-        assert_ne!(
+        // ROOT_OF_UNITY must be derived from the generator: g^t, t = (r-1) >> S.
+        assert_eq!(
+            g.pow(BackendScalar::TRACE),
             Scalar::ROOT_OF_UNITY.0,
-            BackendScalar::ZERO,
-            "ROOT_OF_UNITY should be non-zero"
+            "ROOT_OF_UNITY != MULTIPLICATIVE_GENERATOR^t"
         );
+
+        // ROOT_OF_UNITY must be a *primitive* 2^S root of unity:
+        // root^(2^S) == 1 but root^(2^(S-1)) == -1.
+        let mut acc = Scalar::ROOT_OF_UNITY.0;
+        for _ in 0..(Scalar::S - 1) {
+            acc = acc.square();
+        }
+        assert_eq!(acc, -one, "ROOT_OF_UNITY^(2^(S-1)) must be -1 (primitivity)");
+        acc = acc.square();
+        assert_eq!(acc, one, "ROOT_OF_UNITY^(2^S) must be 1");
+
+        // ROOT_OF_UNITY_INV must be the inverse of ROOT_OF_UNITY.
+        assert_eq!(
+            (Scalar::ROOT_OF_UNITY * Scalar::ROOT_OF_UNITY_INV).0,
+            Scalar::ONE.0,
+            "ROOT_OF_UNITY_INV is not the inverse of ROOT_OF_UNITY"
+        );
+
+        // DELTA must equal MULTIPLICATIVE_GENERATOR^(2^S).
+        let mut delta = g;
+        for _ in 0..Scalar::S {
+            delta = delta.square();
+        }
+        assert_eq!(delta, Scalar::DELTA.0, "DELTA != MULTIPLICATIVE_GENERATOR^(2^S)");
     }
 
     /// Test that Scalar::ZERO and Scalar::ONE match backend values
@@ -1673,25 +1922,40 @@ mod tests {
         assert_eq!(one_plus_one.0, two.0, "ONE + ONE should equal 2");
     }
 
-    /// Test NUM_BITS and CAPACITY are consistent
+    /// NUM_BITS / CAPACITY must reflect the *actual* 251-bit modulus, not an
+    /// over-claimed 255/254 (which silently truncated values a caller packed
+    /// into CAPACITY bits).
     #[test]
     fn test_scalar_bit_constants() {
-        // Note: NUM_BITS = 255 is used for efficiency (next power of 2 above the ~251-bit modulus)
-        // CAPACITY = 254 for constant-time operations (one bit reserved)
-        // This is standard practice in elliptic curve cryptography
-
-        // Verify NUM_BITS is 255 (standard for BabyJubJub)
-        assert_eq!(Scalar::NUM_BITS, 255);
-
-        // CAPACITY should be NUM_BITS - 1
-        assert_eq!(Scalar::CAPACITY, 254);
-
-        // Verify that the actual modulus fits in NUM_BITS
-        let modulus_bits = BackendScalar::MODULUS.num_bits();
-        assert!(
-            modulus_bits <= Scalar::NUM_BITS,
-            "Modulus should fit in NUM_BITS bits"
+        // NUM_BITS must equal the real modulus bit-size.
+        assert_eq!(
+            Scalar::NUM_BITS,
+            BackendScalar::MODULUS_BIT_SIZE,
+            "NUM_BITS must equal the real modulus bit size"
         );
+        assert_eq!(Scalar::NUM_BITS, 251);
+        // CAPACITY is NUM_BITS - 1.
+        assert_eq!(Scalar::CAPACITY, Scalar::NUM_BITS - 1);
+        assert_eq!(Scalar::CAPACITY, 250);
+
+        // The modulus must occupy exactly NUM_BITS bits.
+        assert_eq!(BackendScalar::MODULUS.num_bits(), Scalar::NUM_BITS);
+    }
+
+    /// A value with exactly `CAPACITY` bits set must always round-trip through
+    /// the scalar canonically, whereas a `NUM_BITS`-bit value need not (it can
+    /// exceed `r`). This guards against the previous over-claimed CAPACITY.
+    #[test]
+    fn test_scalar_capacity_round_trip() {
+        // 2^CAPACITY - 1 (all CAPACITY low bits set) is < r, so it round-trips.
+        let cap = Scalar::CAPACITY as usize;
+        let mut le = [0u8; 32];
+        for bit in 0..cap {
+            le[bit / 8] |= 1 << (bit % 8);
+        }
+        let s = Scalar::from_bytes_le(&le);
+        assert_eq!(s.is_some().unwrap_u8(), 1, "CAPACITY-bit value must decode");
+        assert_eq!(s.unwrap().to_bytes_le(), le, "CAPACITY-bit value must round-trip");
     }
 
     /// Test BabyJubJub::FieldBytesSize
@@ -1715,53 +1979,71 @@ mod tests {
         assert_eq!(result.0, Scalar::ONE.0);
     }
 
-    /// Test Scalar::MULTIPLICATIVE_GENERATOR
+    /// MULTIPLICATIVE_GENERATOR must be a quadratic non-residue (and therefore
+    /// not 5, which is a QR mod r).
     #[test]
     fn test_scalar_multiplicative_generator() {
-        let gen: Scalar = 5u64.into();
-        assert_eq!(gen.0, Scalar::MULTIPLICATIVE_GENERATOR.0);
+        let g = Scalar::MULTIPLICATIVE_GENERATOR.0;
+        assert_eq!(
+            g.pow(BackendScalar::MODULUS_MINUS_ONE_DIV_TWO),
+            -BackendScalar::ONE,
+            "generator must be a quadratic non-residue"
+        );
+        let five: Scalar = 5u64.into();
+        assert_ne!(g, five.0, "5 is a QR mod r and is not a valid generator");
     }
 
-    /// Test Scalar::NUM_BITS
+    /// Test Scalar::NUM_BITS reflects the real 251-bit modulus.
     #[test]
     fn test_scalar_num_bits() {
-        assert_eq!(Scalar::NUM_BITS, 255);
+        assert_eq!(Scalar::NUM_BITS, 251);
+        assert_eq!(Scalar::NUM_BITS, BackendScalar::MODULUS_BIT_SIZE);
     }
 
-    /// Test Scalar::CAPACITY
+    /// Test Scalar::CAPACITY is NUM_BITS - 1.
     #[test]
     fn test_scalar_capacity() {
-        assert_eq!(Scalar::CAPACITY, 254);
+        assert_eq!(Scalar::CAPACITY, 250);
+        assert_eq!(Scalar::CAPACITY, Scalar::NUM_BITS - 1);
     }
 
     /// Test Scalar::S
     #[test]
     fn test_scalar_s() {
-        // S = 4 because r - 1 = 2^4 * s
+        // S = 4 because r - 1 = 2^4 * t with t odd.
         assert_eq!(Scalar::S, 4);
+        assert_eq!(Scalar::S, BackendScalar::TWO_ADICITY);
     }
 
-    /// Test Scalar::ROOT_OF_UNITY exists and is non-zero
+    /// ROOT_OF_UNITY must be a primitive 2^S root of unity.
     #[test]
     fn test_scalar_root_of_unity() {
-        // Just verify the constant exists and is non-zero
-        assert_ne!(Scalar::ROOT_OF_UNITY.0, BackendScalar::ZERO);
-        assert_ne!(Scalar::ROOT_OF_UNITY.0, BackendScalar::ONE);
+        let mut acc = Scalar::ROOT_OF_UNITY.0;
+        for _ in 0..(Scalar::S - 1) {
+            acc = acc.square();
+        }
+        // root^(2^(S-1)) == -1 (primitive), root^(2^S) == 1.
+        assert_eq!(acc, -BackendScalar::ONE);
+        assert_eq!(acc.square(), BackendScalar::ONE);
     }
 
-    /// Test Scalar::ROOT_OF_UNITY_INV exists and is non-zero
+    /// ROOT_OF_UNITY_INV must be the multiplicative inverse of ROOT_OF_UNITY.
     #[test]
     fn test_scalar_root_of_unity_inv() {
-        // Just verify the constant exists and is non-zero
-        assert_ne!(Scalar::ROOT_OF_UNITY_INV.0, BackendScalar::ZERO);
+        assert_eq!(
+            (Scalar::ROOT_OF_UNITY * Scalar::ROOT_OF_UNITY_INV).0,
+            Scalar::ONE.0
+        );
     }
 
-    /// Test Scalar::DELTA exists and is non-zero
+    /// DELTA must equal MULTIPLICATIVE_GENERATOR^(2^S).
     #[test]
     fn test_scalar_delta() {
-        // DELTA = (r - 1) / 2
-        // Just verify the constant exists and is non-zero
-        assert_ne!(Scalar::DELTA.0, BackendScalar::ZERO);
+        let mut delta = Scalar::MULTIPLICATIVE_GENERATOR.0;
+        for _ in 0..Scalar::S {
+            delta = delta.square();
+        }
+        assert_eq!(delta, Scalar::DELTA.0);
     }
 
     /// Test From<&AffinePoint> for ProjectivePoint
@@ -1806,16 +2088,16 @@ mod tests {
     /// Test AsRef<[u8]> for GroupRepr
     #[test]
     fn test_group_repr_as_ref() {
-        let repr = GroupRepr([42u8; 33]);
+        let repr = GroupRepr([42u8; 32]);
         let bytes: &[u8] = repr.as_ref();
-        assert_eq!(bytes.len(), 33);
+        assert_eq!(bytes.len(), 32);
         assert_eq!(bytes[0], 42);
     }
 
     /// Test AsMut<[u8]> for GroupRepr
     #[test]
     fn test_group_repr_as_mut() {
-        let mut repr = GroupRepr([0u8; 33]);
+        let mut repr = GroupRepr([0u8; 32]);
         let bytes: &mut [u8] = repr.as_mut();
         bytes[0] = 42;
         assert_eq!(repr.as_ref()[0], 42);
@@ -1883,12 +2165,13 @@ mod tests {
 
         let identity = ProjectivePoint::IDENTITY;
         let bytes = identity.to_bytes();
-        // y=1 (little-endian), sign bit = 0 (x=0 is "positive")
-        // y=1 in little-endian is [1, 0, 0, ...]
+        // y=1 (little-endian) is [1, 0, 0, ...]; the x-sign flag is packed into
+        // bit 7 of the final (32nd) byte and is 0 for x = 0.
+        assert_eq!(bytes.as_ref().len(), 32);
         assert_eq!(bytes.as_ref()[0], 1);
         assert_eq!(&bytes.as_ref()[1..32], &[0u8; 31]);
-        // Sign bit should be 0 (bit 7 of last byte not set)
-        assert_eq!(bytes.as_ref()[32] & 0x80, 0);
+        // Sign bit should be 0 (bit 7 of the last byte not set).
+        assert_eq!(bytes.as_ref()[31] & 0x80, 0);
 
         // Decode and verify
         let decoded = ProjectivePoint::from_bytes(&bytes);
@@ -1987,21 +2270,157 @@ mod tests {
         assert_eq!(decoded_affine.y, gen_affine.y);
     }
 
-    /// Test from_bytes with an invalid point (y-coordinate not on curve)
+    /// Decoding must never panic for arbitrary 32-byte input.
     #[test]
     fn test_group_encoding_from_bytes_invalid_point() {
         use group::GroupEncoding;
 
-        // Create an invalid point with y=0 (which would give x^2 = 1, so x=1 is valid)
-        // But we'll use y=2 which may not correspond to a valid point
-        // The exact invalid point depends on curve parameters
-        let mut bytes = [0u8; 33];
-        bytes[0] = 2; // y = 2 in little-endian
-        bytes[32] = 0; // sign bit = 0
+        // y = 2 (little-endian). Whether this is a valid subgroup point is curve
+        // dependent; the important guarantee is that decoding does not panic.
+        let mut bytes = [0u8; 32];
+        bytes[0] = 2;
+        let _ = ProjectivePoint::from_bytes(&GroupRepr(bytes));
+    }
 
-        let result = ProjectivePoint::from_bytes(&GroupRepr(bytes));
-        // This should either fail or return a valid point - either behavior is acceptable
-        // The important thing is it doesn't panic
-        let _ = result;
+    /// F3: the identity is the affine point (0, 1) (projective (0, k, k)), NOT a
+    /// `z == 0` point. Every identity produced by the API must be detected.
+    #[test]
+    fn test_identity_detection_edwards() {
+        let id = ProjectivePoint::IDENTITY;
+        assert!(id.is_identity());
+        assert!(bool::from(Group::is_identity(&id)));
+
+        let zero_mul = ProjectivePoint::GENERATOR * Scalar::ZERO;
+        assert!(zero_mul.is_identity(), "G * 0 must be identity");
+        assert!(bool::from(Group::is_identity(&zero_mul)));
+
+        let g = ProjectivePoint::GENERATOR;
+        let g_minus_g = g + (-g);
+        assert!(g_minus_g.is_identity(), "G + (-G) must be identity");
+        assert!(bool::from(Group::is_identity(&g_minus_g)));
+
+        assert!(!g.is_identity());
+        assert!(!bool::from(Group::is_identity(&g)));
+    }
+
+    /// F4: fixed-schedule multiplication must agree with the operator.
+    #[test]
+    fn test_mul_fixed_schedule_matches_operator() {
+        let g = ProjectivePoint::GENERATOR;
+        let r_minus_1 = Scalar::ZERO - Scalar::ONE;
+        let big = Scalar::from(u64::MAX) * Scalar::from(0x9e37_79b9_7f4a_7c15u64);
+        let cases = [
+            Scalar::ZERO,
+            Scalar::ONE,
+            Scalar::from(2u64),
+            Scalar::from(5u64),
+            Scalar::from(42u64),
+            Scalar::from(1000u64),
+            r_minus_1,
+            big,
+        ];
+        for sc in cases {
+            let a = g.mul_fixed_schedule(&sc).to_affine();
+            let b = (g * sc).to_affine();
+            assert_eq!(a.x, b.x);
+            assert_eq!(a.y, b.y);
+        }
+        assert!(g.mul_fixed_schedule(&Scalar::ZERO).is_identity());
+        assert_eq!(g.mul_fixed_schedule(&Scalar::ONE).to_affine(), g.to_affine());
+    }
+
+    /// F6: scalar decoding must reject non-canonical (`>= r`) byte strings, so
+    /// distinct encodings cannot map to the same scalar (signature malleability).
+    #[test]
+    fn test_scalar_decoding_is_canonical() {
+        // r itself (big-endian) must be rejected.
+        let mut r_be = [0u8; 32];
+        r_be.copy_from_slice(&hex::decode(ORDER_HEX).unwrap());
+        assert_eq!(
+            Scalar::from_bytes(&r_be).is_some().unwrap_u8(),
+            0,
+            "the modulus r must be rejected as non-canonical"
+        );
+
+        // r - 1 is the canonical maximum and must round-trip.
+        let r_minus_1 = Scalar::ZERO - Scalar::ONE;
+        let be = r_minus_1.to_bytes();
+        let decoded = Scalar::from_bytes(&be);
+        assert_eq!(decoded.is_some().unwrap_u8(), 1);
+        assert_eq!(decoded.unwrap().0, r_minus_1.0);
+
+        // 2^256 - 1 >= r must be rejected.
+        assert_eq!(Scalar::from_bytes(&[0xFFu8; 32]).is_some().unwrap_u8(), 0);
+
+        // Reduction is opt-in only: reduce_bytes_be(r) == 0.
+        assert!(Scalar::reduce_bytes_be(&r_be).is_zero());
+
+        // Little-endian canonical decoding uses the same strict bound.
+        let mut r_le = r_be;
+        r_le.reverse();
+        assert_eq!(Scalar::from_bytes_le(&r_le).is_some().unwrap_u8(), 0);
+        r_le[0] = r_le[0].wrapping_add(1);
+        assert_eq!(Scalar::from_bytes_le(&r_le).is_some().unwrap_u8(), 0);
+    }
+
+    /// F5: the compressed point encoding is canonical 32 bytes with no ignored
+    /// byte/bits, so it is not malleable.
+    #[test]
+    fn test_point_encoding_is_canonical() {
+        use group::GroupEncoding;
+
+        let g = ProjectivePoint::GENERATOR;
+        let bytes = g.to_bytes();
+        assert_eq!(bytes.as_ref().len(), 32);
+        assert_eq!(ProjectivePoint::from_bytes(&bytes).is_none().unwrap_u8(), 0);
+
+        // Bit 254 (0x40 of the final byte) is unused and must be 0 in a canonical
+        // encoding; setting it makes y >= q, which the decoder must reject.
+        let mut mutated = bytes;
+        mutated.0[31] |= 0x40;
+        assert_eq!(
+            ProjectivePoint::from_bytes(&mutated).is_none().unwrap_u8(),
+            1,
+            "non-canonical spare bit must be rejected"
+        );
+    }
+
+    /// F8: on-curve and prime-order-subgroup helpers, and the checked ctor.
+    #[test]
+    fn test_on_curve_and_subgroup_helpers() {
+        // Generator is on-curve and in the prime-order subgroup.
+        assert!(AffinePoint::GENERATOR.is_on_curve());
+        assert!(AffinePoint::GENERATOR.is_in_prime_order_subgroup());
+        assert!(ProjectivePoint::GENERATOR.is_in_prime_order_subgroup());
+        assert!(ProjectivePoint::GENERATOR.is_on_curve());
+
+        // (0, -1) is the order-2 point: on the curve but NOT in the subgroup.
+        let order2 = AffinePoint::new(BackendBaseField::ZERO, -BackendBaseField::ONE);
+        assert!(order2.is_on_curve());
+        assert!(!order2.is_in_prime_order_subgroup());
+        assert!(
+            AffinePoint::new_checked(BackendBaseField::ZERO, -BackendBaseField::ONE).is_none(),
+            "new_checked must reject small-subgroup points"
+        );
+
+        // The generator passes the checked constructor.
+        let g = AffinePoint::GENERATOR;
+        assert!(AffinePoint::new_checked(g.x, g.y).is_some());
+
+        // (1, 2) is off the curve.
+        let off = AffinePoint::new(BackendBaseField::ONE, BackendBaseField::from(2u64));
+        assert!(!off.is_on_curve());
+
+        // Invalid projective coordinates with z == 0 must not be normalized to
+        // affine identity and accepted by validation helpers.
+        let invalid = ProjectivePoint::new(
+            BackendBaseField::ZERO,
+            BackendBaseField::ONE,
+            BackendBaseField::ZERO,
+        );
+        assert!(!invalid.is_identity());
+        assert!(!bool::from(Group::is_identity(&invalid)));
+        assert!(!invalid.is_on_curve());
+        assert!(!invalid.is_in_prime_order_subgroup());
     }
 }
