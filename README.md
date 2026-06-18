@@ -142,7 +142,7 @@ See the [tests](src/lib.rs) for more examples including:
 - Point operations (add, sub, neg, double)
 - Conversion between affine and projective coordinates
 - Random point generation
-- Fixed-schedule scalar multiplication and constant-time selection/equality operations
+- Constant-time scalar multiplication (`mul_fixed_schedule` / `mul_ct`, the same path the `*` operator takes) and constant-time selection/equality operations
 
 ## Testing
 
@@ -161,11 +161,16 @@ cargo bench
 
 This crate is a thin wrapper over the arkworks backend. Please note:
 
-- **Variable-time arithmetic.** Scalar multiplication via the `*` operator,
-  `Scalar::invert`, and `Scalar`'s `sqrt`/`sqrt_ratio` delegate to the backend
-  and are **not** constant-time. `ProjectivePoint::mul_fixed_schedule` avoids
-  scalar-dependent control flow in this wrapper, but still calls backend group
-  operations and must not be treated as an end-to-end constant-time primitive.
+- **Constant-time scalar multiplication.** Scalar multiplication via the `*`
+  operator and `ProjectivePoint::mul_fixed_schedule` / `mul_ct` delegates to the
+  backend's dedicated constant-time Montgomery ladder (`mul_projective`), which
+  performs a fixed sequence of group operations independent of the scalar value
+  (only the scalar is treated as secret; the base point is assumed public). This
+  is a best-effort *algorithmic* guarantee that still relies on the arkworks
+  backend's branch-free field arithmetic, which is not independently audited here.
+- **Variable-time scalar field arithmetic.** `Scalar::invert` and `Scalar`'s
+  `sqrt`/`sqrt_ratio` delegate to the backend and are **not** constant-time; they
+  can leak their inputs through timing.
 - **Validation.** `ProjectivePoint::from_bytes` validates on-curve and
   prime-order-subgroup membership. The raw constructors `AffinePoint::new_unchecked` /
   `ProjectivePoint::new_unchecked` and `from_bytes_unchecked` do **not**; for untrusted

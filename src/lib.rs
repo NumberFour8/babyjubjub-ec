@@ -8,14 +8,18 @@
 //!
 //! # Security
 //!
-//! - **Side channels / constant-time.** Most arithmetic is delegated to the
-//!   arkworks backend, which is *not* guaranteed constant-time. In particular
-//!   the `Mul<Scalar>` operators on [`ProjectivePoint`], [`Scalar::invert`] and
-//!   [`Scalar`]'s `sqrt`/`sqrt_ratio` are **variable-time** and can leak their
-//!   inputs through timing. [`ProjectivePoint::mul_fixed_schedule`] avoids
-//!   scalar-dependent control flow in this wrapper, but still calls backend
-//!   group operations and must not be treated as an end-to-end constant-time
-//!   primitive. `ConditionallySelectable` and `ct_eq` are constant-time.
+//! - **Side channels / constant-time.** Scalar multiplication — the
+//!   `Mul<Scalar>` operators on [`ProjectivePoint`] as well as
+//!   [`ProjectivePoint::mul_fixed_schedule`] / [`ProjectivePoint::mul_ct`] —
+//!   delegates to the backend's dedicated **constant-time Montgomery ladder**
+//!   (`mul_projective`), which executes a fixed sequence of group operations
+//!   independent of the scalar value (only the scalar is treated as secret; the
+//!   base point is assumed public). This is a best-effort *algorithmic* guarantee
+//!   that still relies on the arkworks backend's branch-free Montgomery field
+//!   arithmetic, which this crate does not independently audit. Other operations
+//!   are **not** constant-time: in particular [`Scalar::invert`] and [`Scalar`]'s
+//!   `sqrt`/`sqrt_ratio` are **variable-time** and can leak their inputs through
+//!   timing. `ConditionallySelectable` and `ct_eq` are constant-time.
 //! - **Validation.** Points decoded via [`GroupEncoding::from_bytes`] are
 //!   checked to be on-curve **and** in the prime-order subgroup. The raw
 //!   constructors [`AffinePoint::new_unchecked`] / [`ProjectivePoint::new_unchecked`] and
@@ -273,38 +277,37 @@ impl ProjectivePoint {
         (a * x2 + y2) * z2 == z2.square() + d * x2 * y2
     }
 
-    /// Fixed-schedule scalar multiplication `[scalar] * self`.
+    /// Constant-time scalar multiplication `[scalar] * self`.
     ///
-    /// This routine always performs 256 iterations and uses a constant-time
-    /// conditional select for every bit, avoiding scalar-dependent loop length
-    /// and branches in this wrapper.
+    /// Delegates to the backend's `mul_projective`, a dedicated **constant-time
+    /// Montgomery ladder**: it performs one ladder step per scalar bit (including
+    /// leading zeros, so the number of steps is fixed at the scalar's bit length)
+    /// using branch-free conditional swaps and the complete (exception-free)
+    /// twisted-Edwards addition law. The scalar is therefore not leaked through
+    /// loop length or data-dependent branches. This is exactly the path taken by
+    /// the `Mul<Scalar>` operators; it is exposed under this name for callers that
+    /// want to make the constant-time intent explicit at the call site.
     ///
     /// # Timing
     ///
-    /// This is **not** an end-to-end constant-time scalar multiplication
-    /// guarantee: each iteration still calls the arkworks backend's point
-    /// addition and doubling routines, whose field/group arithmetic is not
-    /// guaranteed constant-time by this crate.
+    /// The guarantee is *algorithmic* constant-time **in the scalar** (the base
+    /// point is assumed public). It ultimately rests on the arkworks backend's
+    /// Montgomery field arithmetic being branch-free, which this crate does not
+    /// independently audit, so treat it as a strong best-effort rather than a
+    /// formally verified end-to-end guarantee.
     pub fn mul_fixed_schedule(&self, scalar: &Scalar) -> Self {
-        // Canonical little-endian bytes of the scalar (< r < 2^252).
-        let bytes = scalar.to_bytes_le();
-        let mut acc = Self::IDENTITY;
-        // Fixed 256 iterations, MSB-first, regardless of the scalar value.
-        for i in (0..256usize).rev() {
-            let doubled = Group::double(&acc);
-            let sum = doubled + *self;
-            let bit = (bytes[i >> 3] >> (i & 7)) & 1;
-            acc = Self::conditional_select(&doubled, &sum, subtle::Choice::from(bit));
-        }
-        acc
+        // The `*` operator converts to the backend's extended coordinates
+        // (inversion-free) and calls the backend's overridden constant-time
+        // `mul_projective` (a Montgomery ladder). Reuse it so there is a single
+        // scalar-multiplication code path.
+        *self * scalar
     }
 
     /// Compatibility alias for [`ProjectivePoint::mul_fixed_schedule`].
     ///
-    /// Despite the historical `ct` suffix, this method is **not** guaranteed to
-    /// be end-to-end constant-time because it still uses backend point addition
-    /// and doubling internally. Prefer [`ProjectivePoint::mul_fixed_schedule`]
-    /// when referring to its actual timing properties.
+    /// Both delegate to the backend's constant-time Montgomery ladder; see
+    /// [`ProjectivePoint::mul_fixed_schedule`] for the precise timing contract
+    /// and caveats.
     pub fn mul_ct(&self, scalar: &Scalar) -> Self {
         self.mul_fixed_schedule(scalar)
     }
@@ -736,12 +739,14 @@ impl<'a> core::ops::Mul<&'a Scalar> for &ProjectivePoint {
     ///
     /// # Security
     ///
-    /// **Variable-time.** This (and all other `Mul<Scalar>` operator impls)
-    /// delegates to the arkworks backend, whose scalar multiplication is not
-    /// constant-time and can leak the scalar through timing/cache side channels.
-    /// [`ProjectivePoint::mul_fixed_schedule`] avoids scalar-dependent control
-    /// flow in this wrapper, but it still relies on backend group operations and
-    /// is not an end-to-end constant-time guarantee.
+    /// **Constant-time in the scalar.** This (and every other `Mul<Scalar>`
+    /// operator impl) converts the point to the backend's extended coordinates
+    /// (inversion-free) and then calls the backend's `mul_projective`, a
+    /// dedicated constant-time Montgomery ladder that performs a fixed sequence
+    /// of group operations independent of the scalar value (the base point is
+    /// assumed public). See [`ProjectivePoint::mul_fixed_schedule`] for the exact
+    /// contract and caveats (the guarantee is a best-effort algorithmic one that
+    /// relies on the backend's branch-free field arithmetic).
     fn mul(self, scalar: &'a Scalar) -> ProjectivePoint {
         let backend_self = BackendProjective::from(*self);
         let result = backend_self * scalar.0;
@@ -815,9 +820,26 @@ impl From<&ProjectivePoint> for AffinePoint {
 
 impl From<ProjectivePoint> for BackendProjective {
     fn from(point: ProjectivePoint) -> Self {
-        // BackendProjective uses Extended projective coordinates (x, y, t, z) where t = x * y
-        let t = point.x * point.y;
-        Self::new(point.x, point.y, t, point.z)
+        // BackendProjective uses extended twisted-Edwards coordinates (X, Y, T, Z)
+        // with the invariant `T * Z == X * Y`, representing the affine point
+        // `(X/Z, Y/Z)`. This crate's `ProjectivePoint` (x, y, z) represents the
+        // same affine point `(x/z, y/z)`, so scaling by `z` gives a valid extended
+        // representation *without any field inversion*:
+        //
+        //     (x*z, y*z, x*y, z*z)
+        //
+        // because `(x*y) * (z*z) == (x*z) * (y*z)` (the invariant) and
+        // `(x*z)/(z*z) == x/z` (the same affine point). `new_unchecked` skips the
+        // validation the checked `new` performs (an inversion plus on-curve /
+        // subgroup asserts that would *panic* on small-subgroup inputs) — that
+        // work is wasted here and undesirable for a robust scalar-multiplication
+        // primitive, since the backend's group law is complete and homogeneous.
+        Self::new_unchecked(
+            point.x * point.z,
+            point.y * point.z,
+            point.x * point.y,
+            point.z * point.z,
+        )
     }
 }
 
@@ -2364,6 +2386,55 @@ mod tests {
         assert_eq!(
             g.mul_fixed_schedule(&Scalar::ONE).to_affine(),
             g.to_affine()
+        );
+    }
+
+    /// F4b: arithmetic on *non-normalized* (`z != 1`) points must match an
+    /// independent ground truth. This guards the inversion-free
+    /// `ProjectivePoint -> BackendProjective` conversion, whose extended `T`
+    /// coordinate (`x*y`, with the coordinates scaled by `z`) is only exercised
+    /// when a non-normalized point is fed *into* a backend group operation:
+    /// point addition reads `T`, and the scalar-mul ladder seeds itself with the
+    /// base point. The ground truth is the ladder applied to the `z == 1`
+    /// generator, where the converted `T` is trivially correct.
+    #[test]
+    fn test_nonnormalized_point_arithmetic() {
+        let g = ProjectivePoint::GENERATOR;
+
+        // Point addition yields non-normalized representations; assert z != 1 so
+        // the test genuinely exercises the conversion's `T` coordinate.
+        let p2 = g + g; // 2G
+        let p3 = p2 + g; // 3G
+        assert!(
+            p2.z != BackendBaseField::ONE && p3.z != BackendBaseField::ONE,
+            "expected non-normalized (z != 1) points"
+        );
+
+        let five_g = (g * Scalar::from(5u64)).to_affine();
+        let fifteen_g = (g * Scalar::from(15u64)).to_affine();
+
+        // (a) Adding two non-normalized points (addition reads `T`).
+        let sum = (p2 + p3).to_affine();
+        assert_eq!(
+            (sum.x, sum.y),
+            (five_g.x, five_g.y),
+            "2G + 3G must equal 5G"
+        );
+
+        // (b) Scalar-multiplying a non-normalized base (the ladder seeds r1=base).
+        let prod = (p3 * Scalar::from(5u64)).to_affine();
+        assert_eq!(
+            (prod.x, prod.y),
+            (fifteen_g.x, fifteen_g.y),
+            "(3G) * 5 must equal 15G"
+        );
+
+        // (c) The named constant-time entry point on a non-normalized base.
+        let fs = p3.mul_fixed_schedule(&Scalar::from(5u64)).to_affine();
+        assert_eq!(
+            (fs.x, fs.y),
+            (fifteen_g.x, fifteen_g.y),
+            "mul_fixed_schedule on (3G) by 5 must equal 15G"
         );
     }
 
