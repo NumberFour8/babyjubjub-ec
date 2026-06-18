@@ -26,7 +26,7 @@ use ark_ff::{
     BigInteger, UniformRand,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
-use elliptic_curve::{Curve, FieldBytesEncoding, PrimeCurve};
+use elliptic_curve::{Curve, FieldBytesEncoding};
 use group::ff::{Field, PrimeField};
 use group::{Group, GroupEncoding};
 use num_traits::{One, Zero};
@@ -54,8 +54,6 @@ impl Curve for BabyJubJub {
     const ORDER: elliptic_curve::bigint::Odd<Self::Uint> =
         elliptic_curve::bigint::Odd::from_be_hex(ORDER_HEX);
 }
-
-impl PrimeCurve for BabyJubJub {}
 
 impl FieldBytesEncoding<BabyJubJub> for elliptic_curve::bigint::U256 {}
 
