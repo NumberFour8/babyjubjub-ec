@@ -2,11 +2,9 @@
 //!
 //! These tests exercise only the public API and can be run as integration tests.
 
-use babyjubjub_ec::{
-    AffinePoint, GroupRepr, ProjectivePoint, Scalar,
-};
-use group::{Group, GroupEncoding};
+use babyjubjub_ec::{AffinePoint, GroupRepr, ProjectivePoint, Scalar};
 use group::ff::{Field, PrimeField};
+use group::{Group, GroupEncoding};
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 // ==================== Identity Tests ====================
@@ -133,7 +131,10 @@ fn test_mul_fixed_schedule_matches_operator() {
         assert_eq!(a.y, b.y);
     }
     assert!(g.mul_fixed_schedule(&Scalar::ZERO).is_identity());
-    assert_eq!(g.mul_fixed_schedule(&Scalar::ONE).to_affine(), g.to_affine());
+    assert_eq!(
+        g.mul_fixed_schedule(&Scalar::ONE).to_affine(),
+        g.to_affine()
+    );
 }
 
 // ==================== Scalar Field Tests ====================
@@ -481,10 +482,21 @@ fn test_group_encoding_round_trip_generator() {
 
 #[test]
 fn test_group_encoding_from_bytes_unchecked() {
-    let gen = ProjectivePoint::GENERATOR;
-    let bytes = gen.to_bytes();
-    let result = ProjectivePoint::from_bytes_unchecked(&bytes);
-    assert!(bool::from(result.is_some()));
+    // The all-zero encoding has y = 0, which decodes to a cofactor point of
+    // order 4: on the curve but NOT in the prime-order subgroup. This is the
+    // case that actually distinguishes the two decoders -- `from_bytes` runs the
+    // subgroup check and must reject it, while `from_bytes_unchecked` skips that
+    // check and must accept it.
+    let bytes = GroupRepr([0u8; 32]);
+
+    // Checked decoding rejects the small-subgroup point.
+    assert!(bool::from(ProjectivePoint::from_bytes(&bytes).is_none()));
+
+    // Unchecked decoding accepts it, and the recovered point is indeed outside
+    // the prime-order subgroup -- so the two paths really do behave differently.
+    let decoded = ProjectivePoint::from_bytes_unchecked(&bytes);
+    assert!(bool::from(decoded.is_some()));
+    assert!(!decoded.unwrap().is_in_prime_order_subgroup());
 }
 
 #[test]
@@ -503,15 +515,26 @@ fn test_group_encoding_from_bytes_valid_point() {
 
 #[test]
 fn test_group_encoding_from_bytes_sign_bit() {
-    let gen = ProjectivePoint::GENERATOR;
-    let bytes = gen.to_bytes();
+    // A point and its negation share the same y-coordinate and differ only in
+    // the sign of x, which the compressed encoding packs into the top bit of
+    // the final byte. Decoding must honor that bit and recover the correct
+    // point rather than its negation.
+    let g = ProjectivePoint::GENERATOR;
+    let neg_g = -g;
 
-    let decoded = ProjectivePoint::from_bytes(&bytes);
-    assert!(bool::from(decoded.is_some()));
+    let g_bytes = g.to_bytes();
+    let neg_bytes = neg_g.to_bytes();
 
-    let decoded_affine = decoded.unwrap().to_affine();
-    let gen_affine = gen.to_affine();
-    assert_eq!(decoded_affine, gen_affine);
+    // Identical y => only the packed x-sign bit (bit 7 of the last byte) differs.
+    assert_eq!(g_bytes.as_ref()[..31], neg_bytes.as_ref()[..31]);
+    assert_eq!(g_bytes.as_ref()[31] ^ neg_bytes.as_ref()[31], 0x80);
+
+    // Each encoding decodes back to its own point, with the sign preserved.
+    let g_decoded = ProjectivePoint::from_bytes(&g_bytes).unwrap();
+    let neg_decoded = ProjectivePoint::from_bytes(&neg_bytes).unwrap();
+    assert_eq!(g_decoded.to_affine(), g.to_affine());
+    assert_eq!(neg_decoded.to_affine(), neg_g.to_affine());
+    assert_ne!(g_decoded.to_affine(), neg_decoded.to_affine());
 }
 
 #[test]
@@ -565,8 +588,12 @@ fn test_group_repr_as_mut() {
 fn test_on_curve_and_subgroup_helpers() {
     // Generator is on-curve and in the prime-order subgroup
     assert!(bool::from(AffinePoint::GENERATOR.is_on_curve()));
-    assert!(bool::from(AffinePoint::GENERATOR.is_in_prime_order_subgroup()));
-    assert!(bool::from(ProjectivePoint::GENERATOR.is_in_prime_order_subgroup()));
+    assert!(bool::from(
+        AffinePoint::GENERATOR.is_in_prime_order_subgroup()
+    ));
+    assert!(bool::from(
+        ProjectivePoint::GENERATOR.is_in_prime_order_subgroup()
+    ));
     assert!(bool::from(ProjectivePoint::GENERATOR.is_on_curve()));
 
     // Valid point via new (checked constructor)

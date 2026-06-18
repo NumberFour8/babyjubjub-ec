@@ -1,6 +1,6 @@
 [package]
 name = "babyjubjub-ec"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "GPL-3.0"
 description = "BabyJubJub elliptic curve implementation wrapped in elliptic-curve traits"

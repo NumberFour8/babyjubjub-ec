@@ -29,9 +29,10 @@
 //!   Use [`Scalar::reduce_bytes_be`] when modular reduction is explicitly wanted.
 //! - **Zeroization.** [`Scalar`] is `Copy` and therefore cannot implement
 //!   `ZeroizeOnDrop`; copies are not wiped automatically. Callers handling
-//!   secret scalars are responsible for zeroizing their own storage. The
-//!   type implements [`Zeroize`] via [`DefaultIsZeroes`], so you can call
-//!   `.zeroize()` explicitly when done.
+//!   secret scalars are responsible for zeroizing their own storage. When the
+//!   `zeroize` feature is enabled (it is **off** by default), the type
+//!   implements `Zeroize` via `DefaultIsZeroes`, so you can call `.zeroize()`
+//!   explicitly when done.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(
@@ -78,9 +79,8 @@ pub struct BabyJubJub;
 const ORDER_HEX: &str = "060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f1";
 
 const SCALAR_MODULUS_LE: [u8; 32] = [
-    0xf1, 0x26, 0x21, 0x39, 0xdc, 0x97, 0x72, 0x67, 0x0a, 0xee, 0x20, 0x39, 0xb8, 0xed, 0x3e,
-    0xab, 0x0b, 0x2b, 0x30, 0xd0, 0xb6, 0x08, 0x0a, 0x37, 0x05, 0x34, 0x26, 0x5c, 0xce, 0x89,
-    0x0c, 0x06,
+    0xf1, 0x26, 0x21, 0x39, 0xdc, 0x97, 0x72, 0x67, 0x0a, 0xee, 0x20, 0x39, 0xb8, 0xed, 0x3e, 0xab,
+    0x0b, 0x2b, 0x30, 0xd0, 0xb6, 0x08, 0x0a, 0x37, 0x05, 0x34, 0x26, 0x5c, 0xce, 0x89, 0x0c, 0x06,
 ];
 
 impl Curve for BabyJubJub {
@@ -335,8 +335,9 @@ impl ProjectivePoint {
 ///
 /// This type is `Copy` and therefore cannot implement `ZeroizeOnDrop`. Callers
 /// handling secret scalars are responsible for zeroizing their own storage.
-/// The type implements [`Zeroize`] via [`DefaultIsZeroes`], so you can call
-/// `.zeroize()` explicitly when done.
+/// When the `zeroize` feature is enabled (it is **off** by default), the type
+/// implements `Zeroize` via `DefaultIsZeroes`, so you can call `.zeroize()`
+/// explicitly when done.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Scalar(pub BackendScalar);
 
@@ -1416,7 +1417,10 @@ mod tests {
         // The generator must be a quadratic non-residue (and is NOT 5, which is
         // a quadratic residue mod r and therefore an invalid generator).
         let g = Scalar::MULTIPLICATIVE_GENERATOR.0;
-        assert_eq!(g.pow(BackendScalar::MODULUS_MINUS_ONE_DIV_TWO), -BackendScalar::ONE);
+        assert_eq!(
+            g.pow(BackendScalar::MODULUS_MINUS_ONE_DIV_TWO),
+            -BackendScalar::ONE
+        );
         assert_ne!(g, Scalar::from(5u64).0);
     }
 
@@ -1797,7 +1801,11 @@ mod tests {
 
         // ROOT_OF_UNITY is a non-square, so its ratio over 1 is a non-square.
         let (is_square_ns, _) = Scalar::sqrt_ratio(&Scalar::ROOT_OF_UNITY, &Scalar::ONE);
-        assert_eq!(is_square_ns.unwrap_u8(), 0, "a non-square must report is_square == 0");
+        assert_eq!(
+            is_square_ns.unwrap_u8(),
+            0,
+            "a non-square must report is_square == 0"
+        );
 
         // num != 0, den == 0 => (0, _).
         let (is_square_d0, _) = Scalar::sqrt_ratio(&num, &Scalar::ZERO);
@@ -1906,7 +1914,10 @@ mod tests {
         for _ in 0..(Scalar::S - 1) {
             acc = acc.square();
         }
-        assert_eq!(acc, -one, "ROOT_OF_UNITY^(2^(S-1)) must be -1 (primitivity)");
+        assert_eq!(
+            acc, -one,
+            "ROOT_OF_UNITY^(2^(S-1)) must be -1 (primitivity)"
+        );
         acc = acc.square();
         assert_eq!(acc, one, "ROOT_OF_UNITY^(2^S) must be 1");
 
@@ -1922,7 +1933,11 @@ mod tests {
         for _ in 0..Scalar::S {
             delta = delta.square();
         }
-        assert_eq!(delta, Scalar::DELTA.0, "DELTA != MULTIPLICATIVE_GENERATOR^(2^S)");
+        assert_eq!(
+            delta,
+            Scalar::DELTA.0,
+            "DELTA != MULTIPLICATIVE_GENERATOR^(2^S)"
+        );
     }
 
     /// Test that Scalar::ZERO and Scalar::ONE match backend values
@@ -1971,7 +1986,11 @@ mod tests {
         }
         let s = Scalar::from_bytes_le(&le);
         assert_eq!(s.is_some().unwrap_u8(), 1, "CAPACITY-bit value must decode");
-        assert_eq!(s.unwrap().to_bytes_le(), le, "CAPACITY-bit value must round-trip");
+        assert_eq!(
+            s.unwrap().to_bytes_le(),
+            le,
+            "CAPACITY-bit value must round-trip"
+        );
     }
 
     /// Test BabyJubJub::FieldBytesSize
@@ -2342,7 +2361,10 @@ mod tests {
             assert_eq!(a.y, b.y);
         }
         assert!(g.mul_fixed_schedule(&Scalar::ZERO).is_identity());
-        assert_eq!(g.mul_fixed_schedule(&Scalar::ONE).to_affine(), g.to_affine());
+        assert_eq!(
+            g.mul_fixed_schedule(&Scalar::ONE).to_affine(),
+            g.to_affine()
+        );
     }
 
     /// F6: scalar decoding must reject non-canonical (`>= r`) byte strings, so
