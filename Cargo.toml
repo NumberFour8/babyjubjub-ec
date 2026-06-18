@@ -42,6 +42,7 @@ std = [
 [dev-dependencies]
 rand = { version = "0.8", default-features = false }
 criterion = { version = "0.8", default-features = false }
+hex = "0.4"
 
 [[bench]]
 name = "scalar_mult"

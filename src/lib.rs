@@ -38,14 +38,19 @@ use zeroize::DefaultIsZeroes;
 pub struct BabyJubJub;
 
 /// Order of the BabyJubJub scalar field (prime order subgroup)
+///
+/// This is the standard BabyJubJub scalar field order:
 /// r = 2736030358979909402780800718157159386076813972158567259200215660948447373041
+///
+/// NOTE: This value is verified at compile time by tests to match the backend's
+/// `BackendScalar::MODULUS`. If the backend is updated, tests will catch any mismatch.
 const ORDER_HEX: &str = "060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f1";
 
 impl Curve for BabyJubJub {
     type FieldBytesSize = elliptic_curve::consts::U32;
     type Uint = elliptic_curve::bigint::U256;
 
-    /// Order of the BabyJubJub scalar field (from backend)
+    /// Order of the BabyJubJub scalar field
     const ORDER: elliptic_curve::bigint::Odd<Self::Uint> =
         elliptic_curve::bigint::Odd::from_be_hex(ORDER_HEX);
 }
@@ -1567,14 +1572,31 @@ mod tests {
         assert_eq!(repr.as_ref(), &[0u8; 33]);
     }
 
-    /// Test BabyJubJub::ORDER constant
+    /// Test BabyJubJub::ORDER constant matches the backend
     #[test]
     fn test_babyjubjub_order() {
+        // Verify our hardcoded ORDER matches the backend's MODULUS
+        // This ensures the hardcoded value is not outdated
+
+        // Get the ORDER from BabyJubJub and convert to hex
         let order = BabyJubJub::ORDER;
-        // r = 2736030358979909402780800718157159386076813972158567259200215660948447373041
-        // Just verify the order is not zero
         let order_bytes = order.as_ref().to_be_bytes();
-        // First byte should be 0x06 (non-zero)
+        // Convert bytes to hex string (big-endian)
+        let order_hex = hex::encode(order_bytes);
+
+        // Get the backend MODULUS as hex
+        let backend_modulus = BackendScalar::MODULUS;
+        let backend_bytes = backend_modulus.to_bytes_be();
+        let backend_hex = hex::encode(backend_bytes);
+
+        // Both should be equal (this verifies our ORDER_HEX is correct)
+        assert_eq!(
+            order_hex, backend_hex,
+            "ORDER_HEX must match BackendScalar::MODULUS"
+        );
+
+        // Also verify the order is non-zero and has expected properties
+        // First byte in big-endian should be 0x06 (non-zero)
         assert_eq!(order_bytes[0], 0x06);
     }
 
