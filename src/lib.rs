@@ -1193,80 +1193,10 @@ mod tests {
         // order*G = 0, so (order-1)*G = -G
         let neg_gen = -ProjectivePoint::GENERATOR;
 
-        // Debug: print values to understand the bug
-        eprintln!("Generator x: {:?}", ProjectivePoint::GENERATOR.x.0 .0);
-        eprintln!("Generator y: {:?}", ProjectivePoint::GENERATOR.y.0 .0);
-        eprintln!("Generator z: {:?}", ProjectivePoint::GENERATOR.z.0 .0);
-
-        eprintln!("neg_gen x: {:?}", neg_gen.x.0 .0);
-        eprintln!("neg_gen y: {:?}", neg_gen.y.0 .0);
-        eprintln!("neg_gen z: {:?}", neg_gen.z.0 .0);
-
-        eprintln!("result x: {:?}", result.x.0 .0);
-        eprintln!("result y: {:?}", result.y.0 .0);
-        eprintln!("result z: {:?}", result.z.0 .0);
-
-        // Let's trace through what's happening in the negation
-        // 1. ProjectivePoint -> BackendProjective
-        let backend_g: BackendProjective = ProjectivePoint::GENERATOR.into();
-        eprintln!("\n--- Backend conversion of Generator ---");
-        eprintln!("backend_g.x: {:?}", backend_g.x.0 .0);
-        eprintln!("backend_g.y: {:?}", backend_g.y.0 .0);
-        eprintln!("backend_g.t: {:?}", backend_g.t.0 .0);
-        eprintln!("backend_g.z: {:?}", backend_g.z.0 .0);
-
-        // 2. Negate in backend
-        let neg_backend = -backend_g;
-        eprintln!("\n--- After negation in backend ---");
-        eprintln!("neg_backend.x: {:?}", neg_backend.x.0 .0);
-        eprintln!("neg_backend.y: {:?}", neg_backend.y.0 .0);
-        eprintln!("neg_backend.t: {:?}", neg_backend.t.0 .0);
-        eprintln!("neg_backend.z: {:?}", neg_backend.z.0 .0);
-
-        // 3. Convert back to ProjectivePoint
-        let converted_back: ProjectivePoint = neg_backend.into();
-        eprintln!("\n--- After converting back to ProjectivePoint ---");
-        eprintln!("converted_back.x: {:?}", converted_back.x.0 .0);
-        eprintln!("converted_back.y: {:?}", converted_back.y.0 .0);
-        eprintln!("converted_back.z: {:?}", converted_back.z.0 .0);
-
-        eprintln!(
-            "\nneg_gen.x == converted_back.x? {}",
-            neg_gen.x == converted_back.x
-        );
-        eprintln!(
-            "neg_gen.y == converted_back.y? {}",
-            neg_gen.y == converted_back.y
-        );
-        eprintln!(
-            "neg_gen.z == converted_back.z? {}",
-            neg_gen.z == converted_back.z
-        );
-
-        eprintln!("\n=== Comparing as affine ===");
-        let result_affine = result.to_affine();
-        let neg_gen_affine = neg_gen.to_affine();
-
-        eprintln!("result_affine.x: {:?}", result_affine.x.0 .0);
-        eprintln!("result_affine.y: {:?}", result_affine.y.0 .0);
-        eprintln!("neg_gen_affine.x: {:?}", neg_gen_affine.x.0 .0);
-        eprintln!("neg_gen_affine.y: {:?}", neg_gen_affine.y.0 .0);
-
-        eprintln!(
-            "\nresult_affine.x == neg_gen_affine.x? {}",
-            result_affine.x == neg_gen_affine.x
-        );
-        eprintln!(
-            "result_affine.y == neg_gen_affine.y? {}",
-            result_affine.y == neg_gen_affine.y
-        );
-
-        eprintln!("\nresult.x == neg_gen.x? {}", result.x == neg_gen.x);
-        eprintln!("result.y == neg_gen.y? {}", result.y == neg_gen.y);
-        eprintln!("result.z == neg_gen.z? {}", result.z == neg_gen.z);
-
         // In projective coordinates, (x, y, z) and (x*z', y*z', z*z') represent the same point
         // So we need to compare in affine form
+        let result_affine = result.to_affine();
+        let neg_gen_affine = neg_gen.to_affine();
         assert_eq!(result_affine.x, neg_gen_affine.x);
         assert_eq!(result_affine.y, neg_gen_affine.y);
     }

@@ -1,6 +1,6 @@
 [package]
 name = "babyjubjub-ec"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "GPL-3.0"
 description = "BabyJubJub elliptic curve implementation wrapped in elliptic-curve traits"
@@ -46,3 +46,8 @@ criterion = { version = "0.8", default-features = false }
 [[bench]]
 name = "scalar_mult"
 harness = false
+
+# Security patches
+# Note: tracing-subscriber RUSTSEC-2025-0055 is a transitive dependency issue.
+# The library itself doesn't use tracing. Consumers of this library should
+# apply their own patch or use cargo-upgrade-exclude in their root crate.
