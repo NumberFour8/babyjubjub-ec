@@ -18,9 +18,9 @@
 //!   primitive. `ConditionallySelectable` and `ct_eq` are constant-time.
 //! - **Validation.** Points decoded via [`GroupEncoding::from_bytes`] are
 //!   checked to be on-curve **and** in the prime-order subgroup. The raw
-//!   constructors [`AffinePoint::new`] / [`ProjectivePoint::new`] and
+//!   constructors [`AffinePoint::new_unchecked`] / [`ProjectivePoint::new_unchecked`] and
 //!   [`GroupEncoding::from_bytes_unchecked`] perform **no** such checks; prefer
-//!   [`AffinePoint::new_checked`] or the validation helpers
+//!   [`AffinePoint::new`] or the validation helpers
 //!   ([`AffinePoint::is_on_curve`], [`AffinePoint::is_in_prime_order_subgroup`])
 //!   for untrusted input.
 //! - **Canonical encodings.** [`Scalar::from_bytes`] / [`PrimeField::from_repr`]
@@ -29,8 +29,10 @@
 //!   Use [`Scalar::reduce_bytes_be`] when modular reduction is explicitly wanted.
 //! - **Zeroization.** [`Scalar`] is `Copy` and therefore cannot implement
 //!   `ZeroizeOnDrop`; copies are not wiped automatically. Callers handling
-//!   secret scalars are responsible for zeroizing their own storage (the type
-//!   does implement `Zeroize` via `DefaultIsZeroes`).
+//!   secret scalars are responsible for zeroizing their own storage. When the
+//!   `zeroize` feature is enabled (it is **off** by default), the type
+//!   implements `Zeroize` via `DefaultIsZeroes`, so you can call `.zeroize()`
+//!   explicitly when done.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(
@@ -60,6 +62,7 @@ use group::ff::{Field, PrimeField};
 use group::{Group, GroupEncoding};
 use num_traits::{One, Zero};
 use subtle::{ConditionallySelectable, ConstantTimeEq, CtOption};
+#[cfg(feature = "zeroize")]
 use zeroize::DefaultIsZeroes;
 
 /// BabyJubJub curve type
@@ -76,9 +79,8 @@ pub struct BabyJubJub;
 const ORDER_HEX: &str = "060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f1";
 
 const SCALAR_MODULUS_LE: [u8; 32] = [
-    0xf1, 0x26, 0x21, 0x39, 0xdc, 0x97, 0x72, 0x67, 0x0a, 0xee, 0x20, 0x39, 0xb8, 0xed, 0x3e,
-    0xab, 0x0b, 0x2b, 0x30, 0xd0, 0xb6, 0x08, 0x0a, 0x37, 0x05, 0x34, 0x26, 0x5c, 0xce, 0x89,
-    0x0c, 0x06,
+    0xf1, 0x26, 0x21, 0x39, 0xdc, 0x97, 0x72, 0x67, 0x0a, 0xee, 0x20, 0x39, 0xb8, 0xed, 0x3e, 0xab,
+    0x0b, 0x2b, 0x30, 0xd0, 0xb6, 0x08, 0x0a, 0x37, 0x05, 0x34, 0x26, 0x5c, 0xce, 0x89, 0x0c, 0x06,
 ];
 
 impl Curve for BabyJubJub {
@@ -122,11 +124,11 @@ impl AffinePoint {
     /// This performs **no** on-curve or prime-order-subgroup checks. Feeding
     /// attacker-controlled coordinates into curve arithmetic can lead to
     /// invalid-curve and small-subgroup attacks. For untrusted input prefer
-    /// [`AffinePoint::new_checked`] (validates on-curve **and** subgroup
+    /// [`AffinePoint::new`] (validates on-curve **and** subgroup
     /// membership) or decode via [`ProjectivePoint::from_bytes`]. Use
     /// [`AffinePoint::is_on_curve`] / [`AffinePoint::is_in_prime_order_subgroup`]
     /// to validate a point obtained from this constructor.
-    pub fn new(x: BackendBaseField, y: BackendBaseField) -> Self {
+    pub fn new_unchecked(x: BackendBaseField, y: BackendBaseField) -> Self {
         Self { x, y }
     }
 
@@ -134,7 +136,7 @@ impl AffinePoint {
     /// on the curve **and** in the prime-order subgroup.
     ///
     /// This is the safe constructor to use for untrusted `(x, y)` pairs.
-    pub fn new_checked(x: BackendBaseField, y: BackendBaseField) -> Option<Self> {
+    pub fn new(x: BackendBaseField, y: BackendBaseField) -> Option<Self> {
         let p = Self { x, y };
         if p.is_in_prime_order_subgroup() {
             Some(p)
@@ -218,8 +220,18 @@ impl ProjectivePoint {
         }
     };
 
-    /// Create a new projective point from coordinates
-    pub fn new(x: BackendBaseField, y: BackendBaseField, z: BackendBaseField) -> Self {
+    /// Create a new projective point from coordinates **without any validation**.
+    ///
+    /// # Security
+    ///
+    /// This performs **no** on-curve or prime-order-subgroup checks. Feeding
+    /// attacker-controlled coordinates into curve arithmetic can lead to
+    /// invalid-curve and small-subgroup attacks. For untrusted input prefer
+    /// [`ProjectivePoint::from_bytes`] which validates on-curve and subgroup
+    /// membership. Use [`ProjectivePoint::is_on_curve`] /
+    /// [`ProjectivePoint::is_in_prime_order_subgroup`] to validate a point
+    /// obtained from this constructor.
+    pub fn new_unchecked(x: BackendBaseField, y: BackendBaseField, z: BackendBaseField) -> Self {
         Self { x, y, z }
     }
 
@@ -310,7 +322,7 @@ impl ProjectivePoint {
             let z_inv = self.z.inverse().expect("non-zero has inverse");
             let x = self.x * z_inv;
             let y = self.y * z_inv;
-            AffinePoint::new(x, y)
+            AffinePoint::new_unchecked(x, y)
         }
     }
 }
@@ -318,6 +330,14 @@ impl ProjectivePoint {
 // ===== Scalar Wrapper =====
 
 /// Scalar field element
+///
+/// # Zeroization
+///
+/// This type is `Copy` and therefore cannot implement `ZeroizeOnDrop`. Callers
+/// handling secret scalars are responsible for zeroizing their own storage.
+/// When the `zeroize` feature is enabled (it is **off** by default), the type
+/// implements `Zeroize` via `DefaultIsZeroes`, so you can call `.zeroize()`
+/// explicitly when done.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Scalar(pub BackendScalar);
 
@@ -515,6 +535,7 @@ impl ConditionallySelectable for ProjectivePoint {
     }
 }
 
+#[cfg(feature = "zeroize")]
 impl DefaultIsZeroes for ProjectivePoint {}
 
 // ===== GroupEncoding trait implementations =====
@@ -527,14 +548,8 @@ impl DefaultIsZeroes for ProjectivePoint {}
 /// trailing byte, which made the encoding non-canonical and malleable (256
 /// distinct byte strings decoded to the same point); the extra byte has been
 /// removed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GroupRepr(pub [u8; 32]);
-
-impl Default for GroupRepr {
-    fn default() -> Self {
-        GroupRepr([0u8; 32])
-    }
-}
 
 impl AsRef<[u8]> for GroupRepr {
     fn as_ref(&self) -> &[u8] {
@@ -859,6 +874,7 @@ impl ConditionallySelectable for AffinePoint {
     }
 }
 
+#[cfg(feature = "zeroize")]
 impl DefaultIsZeroes for AffinePoint {}
 
 // ===== Scalar Field Implementations =====
@@ -953,6 +969,7 @@ impl ConditionallySelectable for Scalar {
     }
 }
 
+#[cfg(feature = "zeroize")]
 impl DefaultIsZeroes for Scalar {}
 
 impl Field for Scalar {
@@ -1400,7 +1417,10 @@ mod tests {
         // The generator must be a quadratic non-residue (and is NOT 5, which is
         // a quadratic residue mod r and therefore an invalid generator).
         let g = Scalar::MULTIPLICATIVE_GENERATOR.0;
-        assert_eq!(g.pow(BackendScalar::MODULUS_MINUS_ONE_DIV_TWO), -BackendScalar::ONE);
+        assert_eq!(
+            g.pow(BackendScalar::MODULUS_MINUS_ONE_DIV_TWO),
+            -BackendScalar::ONE
+        );
         assert_ne!(g, Scalar::from(5u64).0);
     }
 
@@ -1631,10 +1651,10 @@ mod tests {
         assert_eq!(affine.y, affine_back.y);
     }
 
-    /// Test AffinePoint::new
+    /// Test AffinePoint::new_unchecked
     #[test]
-    fn test_affine_point_new() {
-        let affine = AffinePoint::new(BackendBaseField::ONE, BackendBaseField::ONE);
+    fn test_affine_point_new_unchecked() {
+        let affine = AffinePoint::new_unchecked(BackendBaseField::ONE, BackendBaseField::ONE);
         assert_eq!(affine.x, BackendBaseField::ONE);
         assert_eq!(affine.y, BackendBaseField::ONE);
     }
@@ -1668,10 +1688,10 @@ mod tests {
         let _ = affine.x_is_odd();
     }
 
-    /// Test ProjectivePoint::new
+    /// Test ProjectivePoint::new_unchecked
     #[test]
-    fn test_projective_point_new() {
-        let point = ProjectivePoint::new(
+    fn test_projective_point_new_unchecked() {
+        let point = ProjectivePoint::new_unchecked(
             BackendBaseField::ONE,
             BackendBaseField::ONE,
             BackendBaseField::ONE,
@@ -1781,7 +1801,11 @@ mod tests {
 
         // ROOT_OF_UNITY is a non-square, so its ratio over 1 is a non-square.
         let (is_square_ns, _) = Scalar::sqrt_ratio(&Scalar::ROOT_OF_UNITY, &Scalar::ONE);
-        assert_eq!(is_square_ns.unwrap_u8(), 0, "a non-square must report is_square == 0");
+        assert_eq!(
+            is_square_ns.unwrap_u8(),
+            0,
+            "a non-square must report is_square == 0"
+        );
 
         // num != 0, den == 0 => (0, _).
         let (is_square_d0, _) = Scalar::sqrt_ratio(&num, &Scalar::ZERO);
@@ -1890,7 +1914,10 @@ mod tests {
         for _ in 0..(Scalar::S - 1) {
             acc = acc.square();
         }
-        assert_eq!(acc, -one, "ROOT_OF_UNITY^(2^(S-1)) must be -1 (primitivity)");
+        assert_eq!(
+            acc, -one,
+            "ROOT_OF_UNITY^(2^(S-1)) must be -1 (primitivity)"
+        );
         acc = acc.square();
         assert_eq!(acc, one, "ROOT_OF_UNITY^(2^S) must be 1");
 
@@ -1906,7 +1933,11 @@ mod tests {
         for _ in 0..Scalar::S {
             delta = delta.square();
         }
-        assert_eq!(delta, Scalar::DELTA.0, "DELTA != MULTIPLICATIVE_GENERATOR^(2^S)");
+        assert_eq!(
+            delta,
+            Scalar::DELTA.0,
+            "DELTA != MULTIPLICATIVE_GENERATOR^(2^S)"
+        );
     }
 
     /// Test that Scalar::ZERO and Scalar::ONE match backend values
@@ -1955,7 +1986,11 @@ mod tests {
         }
         let s = Scalar::from_bytes_le(&le);
         assert_eq!(s.is_some().unwrap_u8(), 1, "CAPACITY-bit value must decode");
-        assert_eq!(s.unwrap().to_bytes_le(), le, "CAPACITY-bit value must round-trip");
+        assert_eq!(
+            s.unwrap().to_bytes_le(),
+            le,
+            "CAPACITY-bit value must round-trip"
+        );
     }
 
     /// Test BabyJubJub::FieldBytesSize
@@ -2326,7 +2361,10 @@ mod tests {
             assert_eq!(a.y, b.y);
         }
         assert!(g.mul_fixed_schedule(&Scalar::ZERO).is_identity());
-        assert_eq!(g.mul_fixed_schedule(&Scalar::ONE).to_affine(), g.to_affine());
+        assert_eq!(
+            g.mul_fixed_schedule(&Scalar::ONE).to_affine(),
+            g.to_affine()
+        );
     }
 
     /// F6: scalar decoding must reject non-canonical (`>= r`) byte strings, so
@@ -2395,25 +2433,25 @@ mod tests {
         assert!(ProjectivePoint::GENERATOR.is_on_curve());
 
         // (0, -1) is the order-2 point: on the curve but NOT in the subgroup.
-        let order2 = AffinePoint::new(BackendBaseField::ZERO, -BackendBaseField::ONE);
+        let order2 = AffinePoint::new_unchecked(BackendBaseField::ZERO, -BackendBaseField::ONE);
         assert!(order2.is_on_curve());
         assert!(!order2.is_in_prime_order_subgroup());
         assert!(
-            AffinePoint::new_checked(BackendBaseField::ZERO, -BackendBaseField::ONE).is_none(),
-            "new_checked must reject small-subgroup points"
+            AffinePoint::new(BackendBaseField::ZERO, -BackendBaseField::ONE).is_none(),
+            "new must reject small-subgroup points"
         );
 
         // The generator passes the checked constructor.
         let g = AffinePoint::GENERATOR;
-        assert!(AffinePoint::new_checked(g.x, g.y).is_some());
+        assert!(AffinePoint::new(g.x, g.y).is_some());
 
         // (1, 2) is off the curve.
-        let off = AffinePoint::new(BackendBaseField::ONE, BackendBaseField::from(2u64));
+        let off = AffinePoint::new_unchecked(BackendBaseField::ONE, BackendBaseField::from(2u64));
         assert!(!off.is_on_curve());
 
         // Invalid projective coordinates with z == 0 must not be normalized to
         // affine identity and accepted by validation helpers.
-        let invalid = ProjectivePoint::new(
+        let invalid = ProjectivePoint::new_unchecked(
             BackendBaseField::ZERO,
             BackendBaseField::ONE,
             BackendBaseField::ZERO,

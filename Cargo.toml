@@ -1,6 +1,6 @@
 [package]
 name = "babyjubjub-ec"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "GPL-3.0"
 description = "BabyJubJub elliptic curve implementation wrapped in elliptic-curve traits"
@@ -22,8 +22,8 @@ group = { version = "0.13", default-features = false, features = ["rand"] }
 ff = { version = "0.13", default-features = false }
 # Subtle operations
 subtle = { version = "2.6", default-features = false }
-# Zeroize
-zeroize = { version = "1.8", default-features = false }
+# Zeroize (optional - enables DefaultIsZeroes implementations)
+zeroize = { version = "1.8", default-features = false, optional = true }
 # Random number generation
 rand_core = { version = "0.6", default-features = false }
 # num-traits for Zero and One traits
@@ -44,6 +44,7 @@ std = [
     "ark-ec/std",
     "ark-serialize/std",
 ]
+zeroize = ["dep:zeroize"]
 
 [dev-dependencies]
 rand = { version = "0.8", default-features = false }

@@ -22,6 +22,10 @@ zero-knowledge proofs like zk-SNARKs and ZK-Rollups.
 ## Features
 
 - `std` (default): enables standard-library support (and `std` on the arkworks backend).
+- `zeroize` (**off** by default): implements `zeroize::DefaultIsZeroes` for `Scalar`,
+  `AffinePoint`, and `ProjectivePoint`, enabling an explicit `.zeroize()` on those
+  types. It is disabled by default so the crate does not pull in the `zeroize`
+  dependency unless you ask for it.
 - Disabling default features builds `no_std`. Note that the arkworks backend still
   requires a global allocator (`alloc`), so this targets `no_std + alloc`
   environments rather than bare-metal `no_std` without an allocator.
@@ -32,7 +36,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-babyjubjub-ec = "0.1"
+babyjubjub-ec = "0.2"
 ```
 
 ## Usage
@@ -127,7 +131,8 @@ let decoded = ProjectivePoint::from_bytes(&bytes);
 - `group::ff::PrimeField` for `Scalar`
 - `elliptic_curve::GroupEncoding` for `ProjectivePoint`
 - `subtle::ConditionallySelectable` for `ProjectivePoint`, `AffinePoint`, `Scalar`
-- `zeroize::DefaultIsZeroes` for all point and scalar types
+- `zeroize::DefaultIsZeroes` for all point and scalar types (only when the
+  `zeroize` feature is enabled; it is off by default)
 
 ## Examples
 
@@ -162,16 +167,17 @@ This crate is a thin wrapper over the arkworks backend. Please note:
   scalar-dependent control flow in this wrapper, but still calls backend group
   operations and must not be treated as an end-to-end constant-time primitive.
 - **Validation.** `ProjectivePoint::from_bytes` validates on-curve and
-  prime-order-subgroup membership. The raw constructors `AffinePoint::new` /
-  `ProjectivePoint::new` and `from_bytes_unchecked` do **not**; for untrusted
-  coordinates use `AffinePoint::new_checked` or the `is_on_curve` /
+  prime-order-subgroup membership. The raw constructors `AffinePoint::new_unchecked` /
+  `ProjectivePoint::new_unchecked` and `from_bytes_unchecked` do **not**; for untrusted
+  coordinates use `AffinePoint::new` or the `is_on_curve` /
   `is_in_prime_order_subgroup` helpers.
 - **Canonical encodings.** Scalar decoding (`from_bytes`, `from_repr`) rejects
   non-canonical values `>= r`, and the point encoding is a canonical 32 bytes,
   preventing scalar/point malleability. Use `Scalar::reduce_bytes_be` when
   modular reduction is explicitly desired.
 - **Zeroization.** `Scalar` is `Copy`, so it cannot auto-zeroize on drop; wipe
-  secret storage yourself (the type implements `Zeroize`).
+  secret storage yourself. Enabling the `zeroize` feature (off by default) makes
+  the point and scalar types implement `Zeroize` via `DefaultIsZeroes`.
 
 ## License
 
