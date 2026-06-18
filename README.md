@@ -14,14 +14,17 @@ BabyJubJub is a twisted Edwards curve that is birationally equivalent to the Edw
 ed25519. It is designed to be efficient for arithmetic circuits and is commonly used in
 zero-knowledge proofs like zk-SNARKs and ZK-Rollups.
 
-- **Curve type**: Twisted Edwards curve
-- **Prime order**: 2736030358979909402780800718157159386076813972158567259200215660948447373041
-- **Field**: Binary extension field Fq where q is a 255-bit prime
+- **Curve type**: Twisted Edwards curve (cofactor 8)
+- **Base field `Fq`**: a **prime** field, where `q` is a **254-bit** prime (the BN254 scalar field). Point coordinates live in `Fq`.
+- **Scalar field `Fr`** (`Scalar`): a **prime** field of **251-bit** prime order `r` (the prime-order subgroup):
+  `r = 2736030358979909402780800718157159386076813972158567259200215660948447373041`
 
 ## Features
 
-- `std` (default): Enable standard library support
-- `no_std`: Available for embedded environments
+- `std` (default): enables standard-library support (and `std` on the arkworks backend).
+- Disabling default features builds `no_std`. Note that the arkworks backend still
+  requires a global allocator (`alloc`), so this targets `no_std + alloc`
+  environments rather than bare-metal `no_std` without an allocator.
 
 ## Installation
 
@@ -95,10 +98,13 @@ use babyjubjub_ec::{ProjectivePoint, GroupRepr};
 
 let point = ProjectivePoint::GENERATOR;
 
-// Serialize to bytes (33 bytes: 32 for y-coordinate + 1 for sign)
+// Serialize to the canonical 32-byte compressed encoding
+// (little-endian y with the x-sign flag packed into the top bit of the last byte).
 let bytes: GroupRepr = point.to_bytes();
 
-// Deserialize from bytes
+// Deserialize from bytes. `from_bytes` returns a `CtOption` and validates that
+// the point is on-curve AND in the prime-order subgroup; non-canonical or
+// off-curve/small-subgroup encodings are rejected.
 let decoded = ProjectivePoint::from_bytes(&bytes);
 ```
 
@@ -131,7 +137,7 @@ See the [tests](src/lib.rs) for more examples including:
 - Point operations (add, sub, neg, double)
 - Conversion between affine and projective coordinates
 - Random point generation
-- Constant-time operations
+- Fixed-schedule scalar multiplication and constant-time selection/equality operations
 
 ## Testing
 
@@ -145,6 +151,27 @@ cargo test --features std
 ```bash
 cargo bench
 ```
+
+## Security
+
+This crate is a thin wrapper over the arkworks backend. Please note:
+
+- **Variable-time arithmetic.** Scalar multiplication via the `*` operator,
+  `Scalar::invert`, and `Scalar`'s `sqrt`/`sqrt_ratio` delegate to the backend
+  and are **not** constant-time. `ProjectivePoint::mul_fixed_schedule` avoids
+  scalar-dependent control flow in this wrapper, but still calls backend group
+  operations and must not be treated as an end-to-end constant-time primitive.
+- **Validation.** `ProjectivePoint::from_bytes` validates on-curve and
+  prime-order-subgroup membership. The raw constructors `AffinePoint::new` /
+  `ProjectivePoint::new` and `from_bytes_unchecked` do **not**; for untrusted
+  coordinates use `AffinePoint::new_checked` or the `is_on_curve` /
+  `is_in_prime_order_subgroup` helpers.
+- **Canonical encodings.** Scalar decoding (`from_bytes`, `from_repr`) rejects
+  non-canonical values `>= r`, and the point encoding is a canonical 32 bytes,
+  preventing scalar/point malleability. Use `Scalar::reduce_bytes_be` when
+  modular reduction is explicitly desired.
+- **Zeroization.** `Scalar` is `Copy`, so it cannot auto-zeroize on drop; wipe
+  secret storage yourself (the type implements `Zeroize`).
 
 ## License
 
