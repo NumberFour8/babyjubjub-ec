@@ -21,7 +21,8 @@ zero-knowledge proofs like zk-SNARKs and ZK-Rollups.
 
 ## Features
 
-- `std` (default): enables standard-library support (and `std` on the arkworks backend).
+- `std` (default): enables standard-library support for this wrapper and the
+  arkworks crates it uses directly.
 - `zeroize` (**off** by default): implements `zeroize::DefaultIsZeroes` for `Scalar`,
   `AffinePoint`, and `ProjectivePoint`, enabling an explicit `.zeroize()` on those
   types. It is disabled by default so the crate does not pull in the `zeroize`
@@ -129,7 +130,7 @@ let decoded = ProjectivePoint::from_bytes(&bytes);
 - `group::Group` for `ProjectivePoint`
 - `group::ff::Field` for `Scalar`
 - `group::ff::PrimeField` for `Scalar`
-- `elliptic_curve::GroupEncoding` for `ProjectivePoint`
+- `group::GroupEncoding` for `ProjectivePoint`
 - `subtle::ConditionallySelectable` for `ProjectivePoint`, `AffinePoint`, `Scalar`
 - `zeroize::DefaultIsZeroes` for all point and scalar types (only when the
   `zeroize` feature is enabled; it is off by default)

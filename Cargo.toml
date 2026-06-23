@@ -15,7 +15,7 @@ taceo-ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5.3" }
 # ark-ff for field traits (needed for BackendScalar operations)
 ark-ff = { version = "0.5", default-features = false }
 # elliptic-curve traits
-elliptic-curve = { version = "0.14.0-rc.32", default-features = false }
+elliptic-curve = { version = "0.14.0-rc.36", default-features = false }
 # group crate for core group traits
 group = { version = "0.13", default-features = false, features = ["rand"] }
 # Scalar field operations
@@ -37,7 +37,6 @@ ark-serialize = { version = "0.5", default-features = false }
 [features]
 default = ["std"]
 std = [
-    "taceo-ark-babyjubjub/std",
     "elliptic-curve/std",
     "ff/std",
     "ark-ff/std",
@@ -47,7 +46,9 @@ std = [
 zeroize = ["dep:zeroize"]
 
 [dev-dependencies]
-rand = { version = "0.8", default-features = false }
+# `std_rng` is required by tests that use `StdRng`; declare it explicitly rather
+# than relying on transitive feature unification from ark-std.
+rand = { version = "0.8", default-features = false, features = ["std_rng"] }
 criterion = { version = "0.8", default-features = false }
 hex = "0.4"
 
@@ -56,6 +57,6 @@ name = "scalar_mult"
 harness = false
 
 # Security patches
-# Note: tracing-subscriber RUSTSEC-2025-0055 is a transitive dependency issue.
-# The library itself doesn't use tracing. Consumers of this library should
-# apply their own patch or use cargo-upgrade-exclude in their root crate.
+# Note: avoid enabling the backend's `std` feature here. It enables optional
+# arkworks R1CS dependencies that are not used by this wrapper and pull in
+# tracing-subscriber 0.2.x (RUSTSEC-2025-0055) through ark-relations.

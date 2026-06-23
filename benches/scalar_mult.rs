@@ -9,7 +9,9 @@ fn bench_scalar_mult_256bit(c: &mut Criterion) {
             0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67,
             0x89, 0xAB, 0xCD, 0xEF,
         ]);
-        let scalar = Scalar::from_bytes_le(&bytes).unwrap();
+        // This 256-bit pattern is >= r, so reduce it modulo r rather than decode
+        // canonically (`from_bytes_le` would reject it and `unwrap` would panic).
+        let scalar = Scalar::reduce_bytes_le(&bytes);
 
         b.iter(|| {
             let _ = ProjectivePoint::GENERATOR * scalar;
@@ -20,7 +22,7 @@ fn bench_scalar_mult_256bit(c: &mut Criterion) {
 fn bench_scalar_mult_large(c: &mut Criterion) {
     c.bench_function("scalar_mult_large", |b| {
         let mut bytes = [0u8; 32];
-        // r - 1 (curve order minus 1) - a large scalar
+        // An arbitrary large in-range scalar (< r). (Not r-1; just a wide value.)
         bytes.copy_from_slice(&[
             0xF0, 0xD3, 0x5C, 0xAE, 0x61, 0x3C, 0xF9, 0x72, 0x9E, 0x67, 0x72, 0x0A, 0xE0, 0x93,
             0x3E, 0x8B, 0x2D, 0xDB, 0x3E, 0xAA, 0x95, 0x16, 0x4C, 0x30, 0xD0, 0xB6, 0x08, 0x70,
