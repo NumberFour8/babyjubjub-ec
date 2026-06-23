@@ -82,7 +82,7 @@ fn test_projective_point_neg_ref() {
 
 #[test]
 fn test_projective_point_sum() {
-    let points = vec![
+    let points = [
         ProjectivePoint::GENERATOR,
         ProjectivePoint::GENERATOR,
         ProjectivePoint::GENERATOR,
@@ -242,7 +242,7 @@ fn test_scalar_is_one() {
 
 #[test]
 fn test_scalar_sum() {
-    let scalars = vec![Scalar::from(1u64), Scalar::from(2u64), Scalar::from(3u64)];
+    let scalars = [Scalar::from(1u64), Scalar::from(2u64), Scalar::from(3u64)];
     let sum: Scalar = scalars.into_iter().sum();
     let expected = Scalar::from(6u64);
     assert_eq!(sum, expected);
@@ -250,7 +250,7 @@ fn test_scalar_sum() {
 
 #[test]
 fn test_scalar_product() {
-    let scalars = vec![Scalar::from(2u64), Scalar::from(3u64), Scalar::from(5u64)];
+    let scalars = [Scalar::from(2u64), Scalar::from(3u64), Scalar::from(5u64)];
     let product: Scalar = scalars.into_iter().product();
     let expected = Scalar::from(30u64);
     assert_eq!(product, expected);
@@ -258,7 +258,7 @@ fn test_scalar_product() {
 
 #[test]
 fn test_scalar_sum_empty() {
-    let scalars: Vec<Scalar> = vec![];
+    let scalars: [Scalar; 0] = [];
     let sum: Scalar = scalars.into_iter().sum();
     assert_eq!(sum, Scalar::ZERO);
 }

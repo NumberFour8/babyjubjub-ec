@@ -352,11 +352,19 @@ impl ProjectivePoint {
     ///
     /// # Panics
     ///
-    /// Panics if the point is not in valid projective coordinates (z-coordinate is zero
-    /// but the point is not the identity).
+    /// Panics if `z == 0` and the point is not the identity (i.e. `x != 0` or
+    /// `y != z`). Invalid projective points must not be fed to this method;
+    /// use [`ProjectivePoint::is_on_curve`] to validate untrusted inputs first.
     pub fn to_affine(&self) -> AffinePoint {
         if self.z.is_zero() {
-            AffinePoint::IDENTITY
+            // Only the identity has z == 0: on a twisted Edwards curve the neutral
+            // element is affine (0, 1), i.e. projective (0 : Y : Z) with Y == Z.
+            // Any other point with z == 0 is invalid — panic per the documented contract.
+            assert!(
+                self.x.is_zero() && self.y == self.z,
+                "to_affine called on invalid projective point with z == 0"
+            );
+            return AffinePoint::IDENTITY;
         } else {
             let z_inv = self.z.inverse().expect("non-zero has inverse");
             let x = self.x * z_inv;
@@ -1675,7 +1683,7 @@ mod tests {
     /// Test Sum trait for ProjectivePoint
     #[test]
     fn test_projective_point_sum() {
-        let points = vec![
+        let points = [
             ProjectivePoint::GENERATOR,
             ProjectivePoint::GENERATOR,
             ProjectivePoint::GENERATOR,
@@ -1692,7 +1700,7 @@ mod tests {
     /// Test Sum trait for Scalar
     #[test]
     fn test_scalar_sum() {
-        let scalars = vec![Scalar::from(1u64), Scalar::from(2u64), Scalar::from(3u64)];
+        let scalars = [Scalar::from(1u64), Scalar::from(2u64), Scalar::from(3u64)];
         let sum: Scalar = scalars.into_iter().sum();
         let expected = Scalar::from(6u64);
         assert_eq!(sum.0, expected.0);
@@ -1701,7 +1709,7 @@ mod tests {
     /// Test Product trait for Scalar
     #[test]
     fn test_scalar_product() {
-        let scalars = vec![Scalar::from(2u64), Scalar::from(3u64), Scalar::from(5u64)];
+        let scalars = [Scalar::from(2u64), Scalar::from(3u64), Scalar::from(5u64)];
         let product: Scalar = scalars.into_iter().product();
         let expected = Scalar::from(30u64);
         assert_eq!(product.0, expected.0);
@@ -2225,7 +2233,7 @@ mod tests {
     /// Test Sum trait for empty iterator
     #[test]
     fn test_scalar_sum_empty() {
-        let scalars: Vec<Scalar> = vec![];
+        let scalars: [Scalar; 0] = [];
         let sum: Scalar = scalars.into_iter().sum();
         assert_eq!(sum, Scalar::ZERO);
     }
