@@ -12,7 +12,7 @@
 //!   arkworks backend, which is *not* guaranteed constant-time. In particular
 //!   the `Mul<Scalar>` operators on [`ProjectivePoint`], [`Scalar::invert`] and
 //!   [`Scalar`]'s `sqrt`/`sqrt_ratio` are **variable-time** and can leak their
-//!   inputs through timing. [`ProjectivePoint::mul_fixed_schedule`] avoids
+//!   inputs through timing. [`ProjectivePoint::mul_var_schedule`] avoids
 //!   scalar-dependent control flow in this wrapper, but the underlying field
 //!   arithmetic in `ark-ff` (specifically `Fp::subtract_modulus`, which uses a
 //!   data-dependent BigInteger comparison to decide whether to reduce) is not
@@ -47,6 +47,9 @@
 )]
 #![forbid(unsafe_code)]
 
+#[cfg(all(test, not(feature = "std")))]
+extern crate alloc;
+
 // ===== Re-export backend types =====
 
 pub use taceo_ark_babyjubjub::EdwardsAffine as BackendAffine;
@@ -63,7 +66,7 @@ use ark_ff::{
     UniformRand,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
-use elliptic_curve::{Curve, FieldBytesEncoding};
+use elliptic_curve::Curve;
 use group::ff::{Field, PrimeField};
 use group::{Group, GroupEncoding};
 use num_traits::{One, Zero};
@@ -104,8 +107,6 @@ impl Curve for BabyJubJub {
     const ORDER: elliptic_curve::bigint::Odd<Self::Uint> =
         elliptic_curve::bigint::Odd::from_be_hex(ORDER_HEX);
 }
-
-impl FieldBytesEncoding<BabyJubJub> for elliptic_curve::bigint::U256 {}
 
 // ===== AffinePoint Wrapper =====
 
@@ -471,25 +472,19 @@ impl ProjectivePoint {
     ///
     /// # Panics
     ///
-    /// Panics if `z == 0` and the point is not the identity (i.e. `x != 0` or
-    /// `y != z`). Invalid projective points must not be fed to this method;
-    /// use [`ProjectivePoint::is_on_curve`] to validate untrusted inputs first.
+    /// Panics if the point is not in valid projective coordinates (`z == 0`).
+    /// Invalid projective points must not be fed to this method; use
+    /// [`ProjectivePoint::is_on_curve`] to validate untrusted inputs first.
     pub fn to_affine(&self) -> AffinePoint {
-        if self.z.is_zero() {
-            // Only the identity has z == 0: on a twisted Edwards curve the neutral
-            // element is affine (0, 1), i.e. projective (0 : Y : Z) with Y == Z.
-            // Any other point with z == 0 is invalid — panic per the documented contract.
-            assert!(
-                self.x.is_zero() && self.y == self.z,
-                "to_affine called on invalid projective point with z == 0"
-            );
-            return AffinePoint::IDENTITY;
-        } else {
-            let z_inv = self.z.inverse().expect("non-zero has inverse");
-            let x = self.x * z_inv;
-            let y = self.y * z_inv;
-            AffinePoint::new_unchecked(x, y)
-        }
+        assert!(
+            !self.z.is_zero(),
+            "invalid projective point: z-coordinate is zero"
+        );
+
+        let z_inv = self.z.inverse().expect("non-zero has inverse");
+        let x = self.x * z_inv;
+        let y = self.y * z_inv;
+        AffinePoint::new_unchecked(x, y)
     }
 }
 
@@ -1473,6 +1468,8 @@ impl Scalar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "std"))]
+    use alloc::{vec, vec::Vec};
     // `to_bytes_be` / `num_bits` on the backend's `BigInt` come from this trait.
     use ark_ff::BigInteger;
 
@@ -1509,7 +1506,9 @@ mod tests {
     fn test_add_refs() {
         let a = ProjectivePoint::GENERATOR;
         let b = ProjectivePoint::IDENTITY;
-        let result = &a + &b;
+        let a_ref = &a;
+        let b_ref = &b;
+        let result = a_ref + b_ref;
         assert_eq!(result.x, a.x);
         assert_eq!(result.y, a.y);
         assert_eq!(result.z, a.z);
@@ -1621,7 +1620,9 @@ mod tests {
         let b = ProjectivePoint::IDENTITY;
 
         // Test &T + &T
-        let result1 = &a + &b;
+        let a_ref = &a;
+        let b_ref = &b;
+        let result1 = a_ref + b_ref;
         assert_eq!(result1.x, a.x);
         assert_eq!(result1.y, a.y);
         assert_eq!(result1.z, a.z);
@@ -2878,5 +2879,17 @@ mod tests {
             bool::from(g_proj_idem.is_in_prime_order_subgroup()),
             "[8]([8]G) must still be in the prime-order subgroup (subgroup closure)"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid projective point: z-coordinate is zero")]
+    fn test_projective_to_affine_rejects_zero_z() {
+        let invalid = ProjectivePoint::new_unchecked(
+            BackendBaseField::ZERO,
+            BackendBaseField::ONE,
+            BackendBaseField::ZERO,
+        );
+
+        let _ = invalid.to_affine();
     }
 }

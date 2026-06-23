@@ -12,13 +12,13 @@ use subtle::{ConditionallySelectable, ConstantTimeEq};
 #[test]
 fn test_affine_point_identity() {
     let identity = AffinePoint::IDENTITY;
-    assert!(bool::from(identity.is_identity()));
+    assert!(identity.is_identity());
 }
 
 #[test]
 fn test_projective_point_identity() {
     let identity = ProjectivePoint::IDENTITY;
-    assert!(bool::from(identity.is_identity()));
+    assert!(identity.is_identity());
 }
 
 #[test]
@@ -60,7 +60,9 @@ fn test_add_identity_projective() {
 fn test_add_refs() {
     let a = ProjectivePoint::GENERATOR;
     let b = ProjectivePoint::IDENTITY;
-    let result = &a + &b;
+    let a_ref = &a;
+    let b_ref = &b;
+    let result = a_ref + b_ref;
     assert_eq!(result, a);
 }
 
@@ -68,7 +70,9 @@ fn test_add_refs() {
 fn test_point_ops_with_refs() {
     let a = ProjectivePoint::GENERATOR;
     let b = ProjectivePoint::IDENTITY;
-    let result1 = &a + &b;
+    let a_ref = &a;
+    let b_ref = &b;
+    let result1 = a_ref + b_ref;
     assert_eq!(result1, a);
 }
 
@@ -587,14 +591,10 @@ fn test_group_repr_as_mut() {
 #[test]
 fn test_on_curve_and_subgroup_helpers() {
     // Generator is on-curve and in the prime-order subgroup
-    assert!(bool::from(AffinePoint::GENERATOR.is_on_curve()));
-    assert!(bool::from(
-        AffinePoint::GENERATOR.is_in_prime_order_subgroup()
-    ));
-    assert!(bool::from(
-        ProjectivePoint::GENERATOR.is_in_prime_order_subgroup()
-    ));
-    assert!(bool::from(ProjectivePoint::GENERATOR.is_on_curve()));
+    assert!(AffinePoint::GENERATOR.is_on_curve());
+    assert!(AffinePoint::GENERATOR.is_in_prime_order_subgroup());
+    assert!(ProjectivePoint::GENERATOR.is_in_prime_order_subgroup());
+    assert!(ProjectivePoint::GENERATOR.is_on_curve());
 
     // Valid point via new (checked constructor)
     let g = AffinePoint::GENERATOR;

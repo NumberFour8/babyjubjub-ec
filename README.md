@@ -21,7 +21,8 @@ zero-knowledge proofs like zk-SNARKs and ZK-Rollups.
 
 ## Features
 
-- `std` (default): enables standard-library support (and `std` on the arkworks backend).
+- `std` (default): enables standard-library support for this wrapper and the
+  arkworks crates it uses directly.
 - `zeroize` (**off** by default): implements `zeroize::DefaultIsZeroes` for `Scalar`,
   `AffinePoint`, and `ProjectivePoint`, enabling an explicit `.zeroize()` on those
   types. It is disabled by default so the crate does not pull in the `zeroize`
@@ -163,7 +164,7 @@ This crate is a thin wrapper over the arkworks backend. Please note:
 
 - **Variable-time arithmetic.** Scalar multiplication via the `*` operator,
   `Scalar::invert`, and `Scalar`'s `sqrt`/`sqrt_ratio` delegate to the backend
-  and are **not** constant-time. `ProjectivePoint::mul_fixed_schedule` avoids
+  and are **not** constant-time. `ProjectivePoint::mul_var_schedule` avoids
   scalar-dependent control flow in this wrapper, but still calls backend group
   operations and must not be treated as an end-to-end constant-time primitive.
 - **Validation.** `ProjectivePoint::from_bytes` validates on-curve and
