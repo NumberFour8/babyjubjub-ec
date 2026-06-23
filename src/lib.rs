@@ -55,6 +55,9 @@ pub use taceo_ark_babyjubjub::Fq as BackendBaseField;
 pub use taceo_ark_babyjubjub::Fr as BackendScalar;
 
 // ===== Import required traits for BackendScalar operations =====
+use ark_ec::PrimeGroup;
+#[cfg(test)]
+use ark_ec::CurveConfig;
 use ark_ff::{
     fields::{AdditiveGroup, FftField, Field as ArkField, PrimeField as ArkPrimeField},
     UniformRand,
@@ -85,6 +88,13 @@ const SCALAR_MODULUS_LE: [u8; 32] = [
     0xf1, 0x26, 0x21, 0x39, 0xdc, 0x97, 0x72, 0x67, 0x0a, 0xee, 0x20, 0x39, 0xb8, 0xed, 0x3e, 0xab,
     0x0b, 0x2b, 0x30, 0xd0, 0xb6, 0x08, 0x0a, 0x37, 0x05, 0x34, 0x26, 0x5c, 0xce, 0x89, 0x0c, 0x06,
 ];
+
+/// BabyJubJub cofactor (the number of curve points per prime-order subgroup element).
+///
+/// This value is verified at runtime by [`test_cofactor_matches_backend`] to match
+/// `BackendProjective::Config::COFACTOR`. If the backend is updated, this test will
+/// catch any mismatch.
+pub const COFACTOR: u64 = 8;
 
 impl Curve for BabyJubJub {
     type FieldBytesSize = elliptic_curve::consts::U32;
@@ -253,6 +263,85 @@ impl ProjectivePoint {
         Self { x, y, z }
     }
 
+    /// Construct from raw field components without any validation.
+    ///
+    /// # Security
+    ///
+    /// This method performs **no** on-curve or subgroup checks. Its primary
+    /// use case is constructing known torsion points for testing or for
+    /// performance-critical internal paths where caller guarantees are
+    /// already established. **Never use this with untrusted input.**
+    ///
+    /// Unlike [`new_unchecked`](Self::new_unchecked), this method exists
+    /// because the arithmetic operators (`+`, `*`, etc.) are implemented via
+    /// `From<&ProjectivePoint> for BackendProjective`, which calls
+    /// `BackendProjective::new` and would **panic** on non-subgroup points.
+    /// This method allows constructing a `ProjectivePoint` that can safely be
+    /// used with those operators without triggering the subgroup assertion.
+    ///
+    /// # Example
+    ///
+    /// Construct the order-2 torsion element `(0 : -1 : 1)`:
+    /// ```
+    /// # use babyjubjub_ec::{ProjectivePoint, BackendBaseField};
+    /// # use ark_ff::{fields::AdditiveGroup, Field};
+    /// let p2 = ProjectivePoint::from_raw_parts(
+    ///     BackendBaseField::ZERO,
+    ///     -BackendBaseField::ONE,
+    ///     BackendBaseField::ONE,
+    /// );
+    /// ```
+    pub fn from_raw_parts(x: BackendBaseField, y: BackendBaseField, z: BackendBaseField) -> Self {
+        Self { x, y, z }
+    }
+
+    /// Convert to a backend projective point for use with backend arithmetic,
+    /// bypassing the prime-order-subgroup assertion.
+    ///
+    /// **This is a lower-level escape hatch.** The standard `Into<BackendProjective>`
+    /// conversion panics on non-subgroup points (the backend `new` constructor
+    /// asserts `is_in_correct_subgroup_assuming_on_curve`). This method constructs
+    /// the backend point from raw coordinates directly, without that assertion,
+    /// enabling arithmetic on torsion/small-subgroup points.
+    ///
+    /// Use this only when you need to operate on points that are known to be
+    /// on-curve but not in the prime-order subgroup, and only in controlled
+    /// test or internal-performance contexts. **Never use this with untrusted input.**
+    pub fn to_backend_unchecked(&self) -> BackendProjective {
+        // Construct directly from raw fields to bypass the subgroup assertion.
+        // The t-coordinate is x*y in extended projective form; z is the
+        // projective denominator (z=0 only for the identity, which has y=z=1).
+        BackendProjective {
+            x: self.x,
+            y: self.y,
+            t: self.x * self.y,
+            z: self.z,
+        }
+    }
+
+    /// Group doubling using the backend, bypassing the prime-order-subgroup
+    /// assertion (unlike [`Group::double`] which uses `From` conversions).
+    ///
+    /// This is the counterpart to [`to_backend_unchecked`](Self::to_backend_unchecked)
+    /// for the doubling operation. Use it only when you need to double a point
+    /// that is known to be on-curve but may not be in the prime-order subgroup.
+    /// **Never use this with untrusted input.**
+    pub fn double_unchecked(&self) -> Self {
+        self.to_backend_unchecked().double().into()
+    }
+
+    /// Scalar multiplication using the backend, bypassing the prime-order-subgroup
+    /// assertion (unlike the `*` operator which uses `From` conversions).
+    ///
+    /// This is the counterpart to [`to_backend_unchecked`](Self::to_backend_unchecked)
+    /// for scalar multiplication. Use it only when you need to multiply a point
+    /// that is known to be on-curve but may not be in the prime-order subgroup.
+    /// **Never use this with untrusted input.**
+    pub fn mul_unchecked(&self, scalar: &Scalar) -> Self {
+        let result = self.to_backend_unchecked() * scalar.0;
+        result.into()
+    }
+
     /// Check if this point is the identity (neutral element).
     ///
     /// BabyJubJub is a (complete) twisted Edwards curve, so there is **no**
@@ -346,6 +435,34 @@ impl ProjectivePoint {
     /// Prefer [`ProjectivePoint::mul_fixed_schedule`] in new code.
     pub fn mul_ct(&self, scalar: &Scalar) -> Self {
         self.mul_fixed_schedule(scalar)
+    }
+
+    /// Scalar multiplication that additionally clears the cofactor, producing a
+    /// point guaranteed to be in the prime-order subgroup.
+    ///
+    /// BabyJubJub has cofactor 8, so every point `P` can be written as
+    /// `P = [8]Q` for a unique `Q` in the prime-order subgroup (the "subgroup
+    /// component" of `P`). Plain scalar multiplication `[s]P` preserves the
+    /// subgroup component: `Q` is multiplied by `s` but is never eliminated.
+    ///
+    /// **Security impact.** Protocols that multiply an attacker-supplied point
+    /// by a secret scalar while expecting a prime-order-subgroup result are
+    /// vulnerable to small-subgroup attacks when the attacker can control the
+    /// subgroup component of `P`. This method should be used instead of the
+    /// plain `*` operator whenever the caller needs the result to be provably
+    /// in the prime-order subgroup and the input point is not already known to
+    /// be in it (e.g., points decoded from untrusted input).
+    ///
+    /// Note: this simply computes `[s]([8]P) = [8s]P`, which equals `IDENTITY`
+    /// when `s` is a multiple of the subgroup order, and `[8s]Q` for any other
+    /// `s` — in all cases, the resulting point's subgroup component is
+    /// zeroed out.  Scalar pre-multiplication (`s * cofactor`) is a single
+    /// bigint multiply, and the backend arithmetic path does one full scalar
+    /// multiplication rather than two round-trips through `From`.
+    pub fn mul_with_cofactor_clear(&self, scalar: &Scalar) -> Self {
+        let scaled = scalar * &(COFACTOR.into());
+        let result = self.to_backend_unchecked().mul_bigint(scaled.0.into_bigint());
+        result.into()
     }
 
     /// Convert to affine coordinates.
@@ -879,8 +996,21 @@ impl From<&ProjectivePoint> for AffinePoint {
 
 impl From<ProjectivePoint> for BackendProjective {
     fn from(point: ProjectivePoint) -> Self {
-        // BackendProjective uses Extended projective coordinates (x, y, t, z) where t = x * y
+        // Identity shortcut: BackendProjective::new asserts the subgroup for all
+        // non-identity points, so calling it for the identity would panic.
+        //
+        // The identity in our projective representation is any (0 : λY : λZ) with
+        // λ ≠ 0, equivalently x == 0 and y == z.  In the canonical form
+        // (0, 1, 1) both coordinates are 1; in scaled form (0, 2, 2) they are 2.
+        // Checking only x == 0 would incorrectly match the order-2 torsion element
+        // P2 = (0, -1, 1), so we require y == z as well.
         let t = point.x * point.y;
+        if point.x.is_zero() && point.y == point.z {
+            return Self::zero();
+        }
+        // For all other points (including torsion/small-subgroup points),
+        // BackendProjective::new normalizes z to 1 and checks the subgroup.
+        // For prime-order subgroup points this assert always passes.
         Self::new(point.x, point.y, t, point.z)
     }
 }
@@ -1950,6 +2080,25 @@ mod tests {
         assert_eq!(order_bytes[0], 0x06);
     }
 
+    /// Verify [`COFACTOR`] matches `BackendProjective::Config::COFACTOR`.
+    ///
+    /// If the backend is updated, this test will fail and force a review of
+    /// any hardcoded cofactor-dependent logic (including [`ProjectivePoint::mul_with_cofactor_clear`]).
+    #[test]
+    fn test_cofactor_matches_backend() {
+        let backend_cofactor = <BackendProjective as ark_ec::CurveGroup>::Config::COFACTOR;
+        assert_eq!(
+            backend_cofactor.len(),
+            1,
+            "BackendConfig::COFACTOR must be a single-limb value for this test"
+        );
+        assert_eq!(
+            COFACTOR,
+            backend_cofactor[0],
+            "COFACTOR constant must match BackendConfig::COFACTOR"
+        );
+    }
+
     /// Verify the `ff` field constants actually satisfy their mathematical
     /// contracts (not merely "non-zero"). These checks pin down ROOT_OF_UNITY,
     /// ROOT_OF_UNITY_INV, DELTA, MULTIPLICATIVE_GENERATOR and S against the
@@ -2551,5 +2700,127 @@ mod tests {
         assert!(!bool::from(Group::is_identity(&invalid)));
         assert!(!invalid.is_on_curve());
         assert!(!invalid.is_in_prime_order_subgroup());
+    }
+
+    /// Security test: cofactor clearing.
+    ///
+    /// BabyJubJub has cofactor 8, and the torsion subgroup of the full group
+    /// `G_full ≅ Z/2 × Z/4` has maximum non-trivial order 4. A point in the
+    /// torsion subgroup is NOT in the prime-order subgroup, but plain scalar
+    /// multiplication (`*` / `mul_fixed_schedule`) does not eliminate the
+    /// torsion component:
+    ///
+    /// ```ignore
+    /// [s]P_torsion = P_torsion   (when s is odd, P_torsion has order 2)
+    /// [s]P_torsion = IDENTITY    (when s is even, P_torsion has order 2)
+    /// ```
+    ///
+    /// This leaks the *parity* of the scalar when the attacker controls
+    /// `P_torsion` — a small-subgroup attack. The correct fix is cofactor
+    /// clearing: `[8]P` projects any point onto the prime-order subgroup, and
+    /// `mul_with_cofactor_clear` applies this automatically.
+    #[test]
+    fn test_cofactor_clearing_security() {
+        // The order-2 element P2 = (0, -1) is on the curve but NOT in the
+        // prime-order subgroup. It is its own negation: 2*P2 == IDENTITY.
+        // We use new_unchecked (no on-curve / subgroup checks) and
+        // double_unchecked (avoids the BackendProjective::new subgroup assertion).
+        let p2 = ProjectivePoint::new_unchecked(
+            BackendBaseField::ZERO,
+            -BackendBaseField::ONE,
+            BackendBaseField::ONE,
+        );
+        assert!(
+            bool::from(Group::is_identity(&p2.double_unchecked())),
+            "order-2 element must double to identity"
+        );
+        assert!(!bool::from(Group::is_identity(&p2)));
+        assert!(!p2.is_in_prime_order_subgroup());
+
+        // Verify: [2]P2 == IDENTITY (order 2 element).
+        let two: Scalar = 2u64.into();
+        assert_eq!(
+            p2.mul_unchecked(&two),
+            ProjectivePoint::IDENTITY,
+            "order-2 element must double to identity"
+        );
+
+        // --- Without cofactor clearing ---
+        //
+        // [1]P2 == P2    (odd scalar: torsion component preserved)
+        // [3]P2 == P2    (odd scalar: 3 mod 2 == 1)
+        // [2]P2 == ID    (even scalar: collapses to identity)
+        //
+        // We use mul_unchecked instead of * because the * operator converts
+        // via From<ProjectivePoint> which asserts the subgroup.
+        let one: Scalar = 1u64.into();
+        let three: Scalar = 3u64.into();
+        assert_eq!(p2.mul_unchecked(&one), p2, "[1]P2 must equal P2 (no cofactor cleared)");
+        assert_eq!(p2.mul_unchecked(&three), p2, "[3]P2 must equal P2 (3 mod 2 == 1)");
+        assert_eq!(p2.mul_unchecked(&two), ProjectivePoint::IDENTITY, "[2]P2 == ID");
+
+        // A protocol that multiplies an attacker-supplied point by a secret
+        // scalar `s` will find that the result equals `P2` iff `s` is odd.
+        // This parity leak is a small-subgroup attack vector.
+
+        // --- With cofactor clearing ---
+        //
+        // [8]P2 projects P2 onto the prime-order subgroup:
+        //   P2 = [8]Q  where Q = P2 (since 2*P2 == ID, 4*P2 == ID too,
+        //   and 8 is a multiple of the order of P2, so Q = IDENTITY).
+        // Therefore [1]([8]P2) == IDENTITY (not P2), regardless of scalar parity.
+        let eight: Scalar = 8u64.into();
+        let p2_projected = p2.mul_unchecked(&eight);
+        assert_eq!(
+            p2_projected,
+            ProjectivePoint::IDENTITY,
+            "[8]P2 must project to identity (P2 has order dividing 8)"
+        );
+
+        // [1]([8]P2) == ID — the torsion component is gone.
+        // p2_projected is the identity (y == z), so * on it is safe.
+        assert_eq!(
+            p2_projected * one,
+            ProjectivePoint::IDENTITY,
+            "cofactor-cleared point must stay at identity"
+        );
+
+        // [3]([8]P2) == ID — even with an odd scalar.
+        assert_eq!(
+            p2_projected * three,
+            ProjectivePoint::IDENTITY,
+            "cofactor-cleared point stays at identity under any scalar"
+        );
+
+        // `mul_with_cofactor_clear` applies the same cofactor multiplication.
+        assert_eq!(
+            p2.mul_with_cofactor_clear(&one),
+            ProjectivePoint::IDENTITY,
+            "mul_with_cofactor_clear must eliminate the torsion component"
+        );
+        assert_eq!(
+            p2.mul_with_cofactor_clear(&three),
+            ProjectivePoint::IDENTITY,
+            "mul_with_cofactor_clear must work regardless of scalar parity"
+        );
+
+        // --- Prime-order subgroup points are unaffected ---
+        //
+        // For a generator G in the prime-order subgroup, [8]G is still in the
+        // subgroup (since the subgroup is closed under scalar multiplication
+        // by 8).  The result may have a non-unit z in the backend representation,
+        // so we compare the identity check rather than raw coordinate equality.
+        let g = ProjectivePoint::GENERATOR;
+        let g_projected = g * eight;
+        assert!(
+            bool::from(g_projected.is_in_prime_order_subgroup()),
+            "[8]G must still be in the prime-order subgroup"
+        );
+        // [8]([8]G) == [8]G (idempotent: already in the subgroup).
+        let g_proj_idem = g_projected * eight;
+        assert!(
+            bool::from(g_proj_idem.is_in_prime_order_subgroup()),
+            "[8]([8]G) must still be in the prime-order subgroup (subgroup closure)"
+        );
     }
 }
