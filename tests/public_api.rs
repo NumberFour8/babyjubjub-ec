@@ -110,7 +110,7 @@ fn test_scalar_mult_one() {
 }
 
 #[test]
-fn test_mul_var_schedule_matches_operator() {
+fn test_mul_fixed_schedule_matches_operator() {
     let g = ProjectivePoint::GENERATOR;
     let r_minus_1 = Scalar::ZERO - Scalar::ONE;
     let big = Scalar::from(u64::MAX) * Scalar::from(0x9e37_79b9_7f4a_7c15u64);
@@ -125,13 +125,13 @@ fn test_mul_var_schedule_matches_operator() {
         big,
     ];
     for sc in cases {
-        let a = g.mul_var_schedule(&sc).to_affine();
+        let a = g.mul_fixed_schedule(&sc).to_affine();
         let b = (g * sc).to_affine();
         assert_eq!(a.x, b.x);
         assert_eq!(a.y, b.y);
     }
-    assert!(g.mul_var_schedule(&Scalar::ZERO).is_identity());
-    assert_eq!(g.mul_var_schedule(&Scalar::ONE).to_affine(), g.to_affine());
+    assert!(g.mul_fixed_schedule(&Scalar::ZERO).is_identity());
+    assert_eq!(g.mul_fixed_schedule(&Scalar::ONE).to_affine(), g.to_affine());
 }
 
 // ==================== Scalar Field Tests ====================

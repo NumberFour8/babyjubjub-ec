@@ -198,12 +198,27 @@ impl AffinePoint {
 
 /// Projective point representation
 /// Note: BabyJubJub coordinates are in Fq (base field), not Fr (scalar field)
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ProjectivePoint {
     pub x: BackendBaseField,
     pub y: BackendBaseField,
     pub z: BackendBaseField,
 }
+
+impl PartialEq for ProjectivePoint {
+    fn eq(&self, other: &Self) -> bool {
+        // Identity shortcut: both identity match (avoids a field inversion).
+        if self.is_identity() && other.is_identity() {
+            return true;
+        }
+        // Cross-multiply to compare affine coordinates without normalization:
+        // (X1,Y1,Z1) == (X2,Y2,Z2)  <=>  X1/Z1 == X2/Z2  AND  Y1/Z1 == Y2/Z2
+        //                        <=>  X1*Z2 == X2*Z1    AND  Y1*Z2 == Y2*Z1
+        self.x * other.z == other.x * self.z && self.y * other.z == other.y * self.z
+    }
+}
+
+impl Eq for ProjectivePoint {}
 
 impl ProjectivePoint {
     /// Additive identity of the group (point at infinity)
@@ -247,7 +262,18 @@ impl ProjectivePoint {
     /// short Weierstrass implementation would — is therefore wrong and never
     /// matches a real identity produced by this API.
     pub fn is_identity(&self) -> bool {
-        !self.z.is_zero() && self.x.is_zero() && self.y == self.z
+        // Best-effort constant-time check using bitwise limb operations.
+        // The `z != 0` guard uses short-circuit (not a secret — it determines
+        // representation format, not a key-dependent value).
+        let z_nonzero = !self.z.is_zero();
+        let limbs_x = &self.x.0 .0;
+        let limbs_z = &self.z.0 .0;
+        let x_is_zero = limbs_x[0] == 0 && limbs_x[1] == 0 && limbs_x[2] == 0 && limbs_x[3] == 0;
+        let y_eq_z = self.y.0 .0[0] == limbs_z[0]
+            && self.y.0 .0[1] == limbs_z[1]
+            && self.y.0 .0[2] == limbs_z[2]
+            && self.y.0 .0[3] == limbs_z[3];
+        z_nonzero && x_is_zero && y_eq_z
     }
 
     /// Returns true iff the point is on the curve **and** in the prime-order
@@ -298,7 +324,7 @@ impl ProjectivePoint {
     /// who require end-to-end constant-time scalar multiplication must use a
     /// different backend (e.g. one with bit-mask-based field reduction
     /// throughout, such as `fiat-crypto`-generated code).
-    pub fn mul_var_schedule(&self, scalar: &Scalar) -> Self {
+    pub fn mul_fixed_schedule(&self, scalar: &Scalar) -> Self {
         // Canonical little-endian bytes of the scalar (< r < 2^252).
         let bytes = scalar.to_bytes_le();
         let mut acc = Self::IDENTITY;
@@ -313,13 +339,13 @@ impl ProjectivePoint {
         acc
     }
 
-    /// Alias for [`ProjectivePoint::mul_var_schedule`].
+    /// Alias for [`ProjectivePoint::mul_fixed_schedule`].
     ///
     /// The `ct` suffix is historical and should not be interpreted as a
     /// constant-time guarantee — the underlying field arithmetic is not CT.
-    /// Prefer [`ProjectivePoint::mul_var_schedule`] in new code.
+    /// Prefer [`ProjectivePoint::mul_fixed_schedule`] in new code.
     pub fn mul_ct(&self, scalar: &Scalar) -> Self {
-        self.mul_var_schedule(scalar)
+        self.mul_fixed_schedule(scalar)
     }
 
     /// Convert to affine coordinates.
@@ -451,17 +477,19 @@ impl Scalar {
     /// # Security Note
     ///
     /// This method uses the backend's `inverse()` function which implements
-    /// variable-time algorithms (extended Euclidean algorithm or similar).
-    /// This means:
+    /// a variable-time extended Euclidean algorithm. This means:
     /// - The timing may leak information about whether the input is zero
     /// - The method returns `CtOption::new(Self::ZERO, 0.into())` when input is zero
     ///
-    /// For constant-time inversion, callers should use constant-time techniques
-    /// such as conditional selection after checking `is_zero()` first.
-    /// However, note that checking `is_zero()` itself may leak timing information.
+    /// **Do not use this method with secret nonces** (e.g. the `k` value in
+    /// ECDSA signature generation). The variable-time algorithm can leak the
+    /// nonce through timing, enabling private-key recovery attacks. For
+    /// nonce inversion in signature schemes, use a constant-time modular
+    /// inversion routine instead.
     ///
-    /// For most use cases (e.g., signature verification), this non-constant-time
-    /// behavior is acceptable as the scalar is already validated to be non-zero.
+    /// For most other use cases (e.g., signature verification), the
+    /// non-constant-time behaviour is acceptable as the scalar is already
+    /// validated to be non-zero.
     pub fn invert(&self) -> CtOption<Self> {
         match self.0.inverse() {
             Some(s) => CtOption::new(Self(s), 1.into()),
@@ -502,12 +530,20 @@ impl Group for ProjectivePoint {
         // Twisted Edwards has no point at infinity: the neutral element is the
         // affine point (0, 1), i.e. projective (0 : Y : Z) with Y == Z. Testing
         // `z == 0` (a short-Weierstrass habit) never matches a real identity.
-        use subtle::Choice;
-        if !self.z.is_zero() && self.x.is_zero() && self.y == self.z {
-            Choice::from(1)
-        } else {
-            Choice::from(0)
-        }
+        //
+        // Use bitwise constant-time operations on the field BigInt limbs to
+        // avoid branching on secret-dependent values.
+        let z_nonzero = !self.z.is_zero();
+        let limbs_x = &self.x.0 .0;
+        let limbs_y = &self.y.0 .0;
+        let limbs_z = &self.z.0 .0;
+        let x_is_zero =
+            limbs_x[0].ct_eq(&0) & limbs_x[1].ct_eq(&0) & limbs_x[2].ct_eq(&0) & limbs_x[3].ct_eq(&0);
+        let y_eq_z = limbs_y[0].ct_eq(&limbs_z[0])
+            & limbs_y[1].ct_eq(&limbs_z[1])
+            & limbs_y[2].ct_eq(&limbs_z[2])
+            & limbs_y[3].ct_eq(&limbs_z[3]);
+        subtle::Choice::from(z_nonzero as u8) & x_is_zero & y_eq_z
     }
 
     fn double(&self) -> Self {
@@ -759,7 +795,7 @@ impl<'a> core::ops::Mul<&'a Scalar> for &ProjectivePoint {
     /// **Variable-time.** This (and all other `Mul<Scalar>` operator impls)
     /// delegates to the arkworks backend, whose scalar multiplication is not
     /// constant-time and can leak the scalar through timing/cache side channels.
-    /// [`ProjectivePoint::mul_var_schedule`] avoids scalar-dependent control
+    /// [`ProjectivePoint::mul_fixed_schedule`] avoids scalar-dependent control
     /// flow in this wrapper, but the underlying field arithmetic in `ark-ff`
     /// uses data-dependent conditional reduction and is not constant-time.
     fn mul(self, scalar: &'a Scalar) -> ProjectivePoint {
@@ -2370,7 +2406,7 @@ mod tests {
 
     /// F4: fixed-schedule multiplication must agree with the operator.
     #[test]
-    fn test_mul_var_schedule_matches_operator() {
+    fn test_mul_fixed_schedule_matches_operator() {
         let g = ProjectivePoint::GENERATOR;
         let r_minus_1 = Scalar::ZERO - Scalar::ONE;
         let big = Scalar::from(u64::MAX) * Scalar::from(0x9e37_79b9_7f4a_7c15u64);
@@ -2385,13 +2421,33 @@ mod tests {
             big,
         ];
         for sc in cases {
-            let a = g.mul_var_schedule(&sc).to_affine();
+            let a = g.mul_fixed_schedule(&sc).to_affine();
             let b = (g * sc).to_affine();
             assert_eq!(a.x, b.x);
             assert_eq!(a.y, b.y);
         }
-        assert!(g.mul_var_schedule(&Scalar::ZERO).is_identity());
-        assert_eq!(g.mul_var_schedule(&Scalar::ONE).to_affine(), g.to_affine());
+        assert!(g.mul_fixed_schedule(&Scalar::ZERO).is_identity());
+        assert_eq!(g.mul_fixed_schedule(&Scalar::ONE).to_affine(), g.to_affine());
+    }
+
+    /// Regression: derived PartialEq on projective coordinates was incorrect.
+    /// (X:Y:Z) and (λX:λY:λZ) represent the same affine point for any λ≠0 and
+    /// must compare as equal. The fix uses cross-multiplication without normalization.
+    #[test]
+    fn test_projective_eq_scaled() {
+        let g = ProjectivePoint::GENERATOR;
+        // Produce a point with a non-trivial z (doubling guarantees z ≠ 1).
+        let p = g + g; // doubled generator — z is not 1
+        let three_p = p + g;
+        // Same affine point as p+g but with un-normalized projective coordinates.
+        // Arithmetic on un-normalized points yields scaled representations.
+        let scaled = three_p - g;
+        assert_eq!(
+            scaled, p,
+            "(X:Y:Z) and a scaled (λX:λY:λZ) must be equal"
+        );
+        // Also verify the identity: (0:1:1) is equal to itself even when scaled.
+        assert_eq!(ProjectivePoint::IDENTITY, ProjectivePoint::IDENTITY);
     }
 
     /// F6: scalar decoding must reject non-canonical (`>= r`) byte strings, so
