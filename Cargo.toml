@@ -46,7 +46,9 @@ std = [
 zeroize = ["dep:zeroize"]
 
 [dev-dependencies]
-rand = { version = "0.8", default-features = false }
+# `std_rng` is required by tests that use `StdRng`; declare it explicitly rather
+# than relying on transitive feature unification from ark-std.
+rand = { version = "0.8", default-features = false, features = ["std_rng"] }
 criterion = { version = "0.8", default-features = false }
 hex = "0.4"
 

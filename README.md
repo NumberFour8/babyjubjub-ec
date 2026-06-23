@@ -130,7 +130,7 @@ let decoded = ProjectivePoint::from_bytes(&bytes);
 - `group::Group` for `ProjectivePoint`
 - `group::ff::Field` for `Scalar`
 - `group::ff::PrimeField` for `Scalar`
-- `elliptic_curve::GroupEncoding` for `ProjectivePoint`
+- `group::GroupEncoding` for `ProjectivePoint`
 - `subtle::ConditionallySelectable` for `ProjectivePoint`, `AffinePoint`, `Scalar`
 - `zeroize::DefaultIsZeroes` for all point and scalar types (only when the
   `zeroize` feature is enabled; it is off by default)
@@ -164,7 +164,7 @@ This crate is a thin wrapper over the arkworks backend. Please note:
 
 - **Variable-time arithmetic.** Scalar multiplication via the `*` operator,
   `Scalar::invert`, and `Scalar`'s `sqrt`/`sqrt_ratio` delegate to the backend
-  and are **not** constant-time. `ProjectivePoint::mul_var_schedule` avoids
+  and are **not** constant-time. `ProjectivePoint::mul_fixed_schedule` avoids
   scalar-dependent control flow in this wrapper, but still calls backend group
   operations and must not be treated as an end-to-end constant-time primitive.
 - **Validation.** `ProjectivePoint::from_bytes` validates on-curve and
