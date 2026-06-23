@@ -13,8 +13,11 @@
 //!   the `Mul<Scalar>` operators on [`ProjectivePoint`], [`Scalar::invert`] and
 //!   [`Scalar`]'s `sqrt`/`sqrt_ratio` are **variable-time** and can leak their
 //!   inputs through timing. [`ProjectivePoint::mul_fixed_schedule`] avoids
-//!   scalar-dependent control flow in this wrapper, but still calls backend
-//!   group operations and must not be treated as an end-to-end constant-time
+//!   scalar-dependent control flow in this wrapper, but the underlying field
+//!   arithmetic in `ark-ff` (specifically `Fp::subtract_modulus`, which uses a
+//!   data-dependent BigInteger comparison to decide whether to reduce) is not
+//!   constant-time. Consequently every ladder iteration carries a small timing
+//!   signal, and the method must not be treated as an end-to-end constant-time
 //!   primitive. `ConditionallySelectable` and `ct_eq` are constant-time.
 //! - **Validation.** Points decoded via [`GroupEncoding::from_bytes`] are
 //!   checked to be on-curve **and** in the prime-order subgroup. The raw
@@ -273,24 +276,35 @@ impl ProjectivePoint {
         (a * x2 + y2) * z2 == z2.square() + d * x2 * y2
     }
 
-    /// Fixed-schedule scalar multiplication `[scalar] * self`.
+    /// Variable-time scalar multiplication `[scalar] * self`.
     ///
-    /// This routine always performs 256 iterations and uses a constant-time
-    /// conditional select for every bit, avoiding scalar-dependent loop length
-    /// and branches in this wrapper.
+    /// Uses a Montgomery ladder with a fixed iteration count and bit-mask
+    /// conditional select — there is no scalar-dependent loop length or
+    /// early-exit in this wrapper. However, see the section below for the
+    /// end-to-end timing guarantee.
     ///
     /// # Timing
     ///
-    /// This is **not** an end-to-end constant-time scalar multiplication
-    /// guarantee: each iteration still calls the arkworks backend's point
-    /// addition and doubling routines, whose field/group arithmetic is not
-    /// guaranteed constant-time by this crate.
-    pub fn mul_fixed_schedule(&self, scalar: &Scalar) -> Self {
+    /// This is **not** an end-to-end constant-time scalar multiplication.
+    /// The Montgomery ladder structure (fixed loop length, bit-mask conditional
+    /// swap) is constant-time at the algorithm level, but each iteration calls
+    /// the arkworks backend's point addition and doubling, which in turn call
+    /// `ark-ff` field arithmetic. That field arithmetic uses a data-dependent
+    /// conditional reduction (`Fp::subtract_modulus` via `is_geq_modulus`, a
+    /// regular BigInteger comparison that compiles to u64-level conditional
+    /// jumps). Whether this reduction fires in a given iteration is a function
+    /// of the intermediate field values, which are themselves a function of
+    /// the scalar, so the operation carries a small timing signal. Callers
+    /// who require end-to-end constant-time scalar multiplication must use a
+    /// different backend (e.g. one with bit-mask-based field reduction
+    /// throughout, such as `fiat-crypto`-generated code).
+    pub fn mul_var_schedule(&self, scalar: &Scalar) -> Self {
         // Canonical little-endian bytes of the scalar (< r < 2^252).
         let bytes = scalar.to_bytes_le();
         let mut acc = Self::IDENTITY;
-        // Fixed 256 iterations, MSB-first, regardless of the scalar value.
-        for i in (0..256usize).rev() {
+        // Scalar::NUM_BITS iterations covers all valid bits; bits NUM_BITS..255 are
+        // always zero per the field definition, so processing them is wasted work.
+        for i in (0..Scalar::NUM_BITS as usize).rev() {
             let doubled = Group::double(&acc);
             let sum = doubled + *self;
             let bit = (bytes[i >> 3] >> (i & 7)) & 1;
@@ -299,14 +313,13 @@ impl ProjectivePoint {
         acc
     }
 
-    /// Compatibility alias for [`ProjectivePoint::mul_fixed_schedule`].
+    /// Alias for [`ProjectivePoint::mul_var_schedule`].
     ///
-    /// Despite the historical `ct` suffix, this method is **not** guaranteed to
-    /// be end-to-end constant-time because it still uses backend point addition
-    /// and doubling internally. Prefer [`ProjectivePoint::mul_fixed_schedule`]
-    /// when referring to its actual timing properties.
+    /// The `ct` suffix is historical and should not be interpreted as a
+    /// constant-time guarantee — the underlying field arithmetic is not CT.
+    /// Prefer [`ProjectivePoint::mul_var_schedule`] in new code.
     pub fn mul_ct(&self, scalar: &Scalar) -> Self {
-        self.mul_fixed_schedule(scalar)
+        self.mul_var_schedule(scalar)
     }
 
     /// Convert to affine coordinates.
@@ -592,8 +605,15 @@ impl GroupEncoding for ProjectivePoint {
 }
 
 impl ProjectivePoint {
-    /// Internal implementation of from_bytes and from_bytes_unchecked
-    /// When validate is true, checks that the point is on the curve and in the correct subgroup
+    /// Internal implementation of from_bytes and from_bytes_unchecked.
+    /// When validate is true, checks that the point is on the curve and in the correct subgroup.
+    ///
+    /// NOTE: the backend's specific deserialization error is dropped here —
+    /// both malformed encoding and "valid point not in subgroup" produce the
+    /// same `CtOption::new(Self::IDENTITY, 0.into())`. If fine-grained error
+    /// handling is needed in future, this function's return type must change
+    /// to carry a `Result` or a custom enum variant. The current `None`
+    /// contract is intentional for API surface-area reasons.
     fn from_bytes_impl(bytes: &[u8; 32], validate: bool) -> CtOption<Self> {
         // Use the backend's deserialization which properly handles Montgomery form
         let mut reader = bytes.as_ref();
@@ -739,9 +759,9 @@ impl<'a> core::ops::Mul<&'a Scalar> for &ProjectivePoint {
     /// **Variable-time.** This (and all other `Mul<Scalar>` operator impls)
     /// delegates to the arkworks backend, whose scalar multiplication is not
     /// constant-time and can leak the scalar through timing/cache side channels.
-    /// [`ProjectivePoint::mul_fixed_schedule`] avoids scalar-dependent control
-    /// flow in this wrapper, but it still relies on backend group operations and
-    /// is not an end-to-end constant-time guarantee.
+    /// [`ProjectivePoint::mul_var_schedule`] avoids scalar-dependent control
+    /// flow in this wrapper, but the underlying field arithmetic in `ark-ff`
+    /// uses data-dependent conditional reduction and is not constant-time.
     fn mul(self, scalar: &'a Scalar) -> ProjectivePoint {
         let backend_self = BackendProjective::from(*self);
         let result = backend_self * scalar.0;
@@ -1029,6 +1049,16 @@ impl Field for Scalar {
     /// The previous implementation was a stub that unconditionally returned
     /// `(1, 1)`, silently claiming every ratio was a square — which breaks any
     /// hash-to-curve / quadratic-residue test built on it.
+    ///
+    /// # Security
+    ///
+    /// Variable-time: the implementation calls `sqrt` (a Tonelli–Shanks
+    /// variant) whose control flow depends on the input, and the Legendre
+    /// symbol computation itself can leak whether `num/div` is a quadratic
+    /// residue through timing. For hash-to-curve constructions where the
+    /// quadratic-residue decision on a secret input must remain secret,
+    /// this method is not appropriate. No constant-time alternative is
+    /// provided by this crate.
     fn sqrt_ratio(num: &Self, div: &Self) -> (subtle::Choice, Self) {
         group::ff::helpers::sqrt_ratio_generic(num, div)
     }
@@ -2340,7 +2370,7 @@ mod tests {
 
     /// F4: fixed-schedule multiplication must agree with the operator.
     #[test]
-    fn test_mul_fixed_schedule_matches_operator() {
+    fn test_mul_var_schedule_matches_operator() {
         let g = ProjectivePoint::GENERATOR;
         let r_minus_1 = Scalar::ZERO - Scalar::ONE;
         let big = Scalar::from(u64::MAX) * Scalar::from(0x9e37_79b9_7f4a_7c15u64);
@@ -2355,16 +2385,13 @@ mod tests {
             big,
         ];
         for sc in cases {
-            let a = g.mul_fixed_schedule(&sc).to_affine();
+            let a = g.mul_var_schedule(&sc).to_affine();
             let b = (g * sc).to_affine();
             assert_eq!(a.x, b.x);
             assert_eq!(a.y, b.y);
         }
-        assert!(g.mul_fixed_schedule(&Scalar::ZERO).is_identity());
-        assert_eq!(
-            g.mul_fixed_schedule(&Scalar::ONE).to_affine(),
-            g.to_affine()
-        );
+        assert!(g.mul_var_schedule(&Scalar::ZERO).is_identity());
+        assert_eq!(g.mul_var_schedule(&Scalar::ONE).to_affine(), g.to_affine());
     }
 
     /// F6: scalar decoding must reject non-canonical (`>= r`) byte strings, so
