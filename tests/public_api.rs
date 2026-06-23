@@ -131,7 +131,10 @@ fn test_mul_fixed_schedule_matches_operator() {
         assert_eq!(a.y, b.y);
     }
     assert!(g.mul_fixed_schedule(&Scalar::ZERO).is_identity());
-    assert_eq!(g.mul_fixed_schedule(&Scalar::ONE).to_affine(), g.to_affine());
+    assert_eq!(
+        g.mul_fixed_schedule(&Scalar::ONE).to_affine(),
+        g.to_affine()
+    );
 }
 
 // ==================== Scalar Field Tests ====================

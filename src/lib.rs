@@ -55,9 +55,9 @@ pub use taceo_ark_babyjubjub::Fq as BackendBaseField;
 pub use taceo_ark_babyjubjub::Fr as BackendScalar;
 
 // ===== Import required traits for BackendScalar operations =====
-use ark_ec::PrimeGroup;
 #[cfg(test)]
 use ark_ec::CurveConfig;
+use ark_ec::PrimeGroup;
 use ark_ff::{
     fields::{AdditiveGroup, FftField, Field as ArkField, PrimeField as ArkPrimeField},
     UniformRand,
@@ -461,7 +461,9 @@ impl ProjectivePoint {
     /// multiplication rather than two round-trips through `From`.
     pub fn mul_with_cofactor_clear(&self, scalar: &Scalar) -> Self {
         let scaled = scalar * &(COFACTOR.into());
-        let result = self.to_backend_unchecked().mul_bigint(scaled.0.into_bigint());
+        let result = self
+            .to_backend_unchecked()
+            .mul_bigint(scaled.0.into_bigint());
         result.into()
     }
 
@@ -662,8 +664,10 @@ impl Group for ProjectivePoint {
         let limbs_x = &self.x.0 .0;
         let limbs_y = &self.y.0 .0;
         let limbs_z = &self.z.0 .0;
-        let x_is_zero =
-            limbs_x[0].ct_eq(&0) & limbs_x[1].ct_eq(&0) & limbs_x[2].ct_eq(&0) & limbs_x[3].ct_eq(&0);
+        let x_is_zero = limbs_x[0].ct_eq(&0)
+            & limbs_x[1].ct_eq(&0)
+            & limbs_x[2].ct_eq(&0)
+            & limbs_x[3].ct_eq(&0);
         let y_eq_z = limbs_y[0].ct_eq(&limbs_z[0])
             & limbs_y[1].ct_eq(&limbs_z[1])
             & limbs_y[2].ct_eq(&limbs_z[2])
@@ -776,9 +780,12 @@ impl ProjectivePoint {
     /// to carry a `Result` or a custom enum variant. The current `None`
     /// contract is intentional for API surface-area reasons.
     fn from_bytes_impl(bytes: &[u8; 32], validate: bool) -> CtOption<Self> {
-        // Use the backend's deserialization which properly handles Montgomery form
+        // Use the backend's deserialization which properly handles Montgomery form.
+        // Restructure so that both success and failure paths execute the same amount
+        // of work — early returns on deserialization failure would otherwise constitute
+        // a timing side-channel on whether the encoding is parseable at all.
         let mut reader = bytes.as_ref();
-        let backend_affine = match BackendAffine::deserialize_with_mode(
+        let (backend_affine, was_ok) = match BackendAffine::deserialize_with_mode(
             &mut reader,
             Compress::Yes,
             if validate {
@@ -787,17 +794,26 @@ impl ProjectivePoint {
                 Validate::No
             },
         ) {
-            Ok(affine) => affine,
-            Err(_) => return CtOption::new(Self::IDENTITY, 0.into()),
+            Ok(affine) => (affine, true),
+            // Construct the default affine point even on failure so both branches
+            // execute the same number of field reads and allocations before we
+            // branch on `was_ok`. This eliminates the timing signal.
+            Err(_) => (
+                BackendAffine {
+                    x: BackendBaseField::ZERO,
+                    y: BackendBaseField::ONE,
+                },
+                false,
+            ),
         };
 
-        // Convert backend affine to our affine wrapper
+        // Convert backend affine to our affine wrapper — unconditionally
         let our_affine = AffinePoint {
             x: backend_affine.x,
             y: backend_affine.y,
         };
 
-        CtOption::new(Self::from(our_affine), 1.into())
+        CtOption::new(Self::from(our_affine), subtle::Choice::from(was_ok as u8))
     }
 }
 
@@ -1415,6 +1431,35 @@ impl ConstantTimeEq for Scalar {
 
         // CT comparison: all limbs must be equal
         a[0].ct_eq(&b[0]) & a[1].ct_eq(&b[1]) & a[2].ct_eq(&b[2]) & a[3].ct_eq(&b[3])
+    }
+}
+
+// Constant-time equality for AffinePoint: compare x and y coordinate limbs.
+impl ConstantTimeEq for AffinePoint {
+    fn ct_eq(&self, other: &Self) -> subtle::Choice {
+        let ax = &self.x.0 .0;
+        let ay = &self.y.0 .0;
+        let bx = &other.x.0 .0;
+        let by = &other.y.0 .0;
+
+        (ax[0].ct_eq(&bx[0]) & ax[1].ct_eq(&bx[1]) & ax[2].ct_eq(&bx[2]) & ax[3].ct_eq(&bx[3]))
+            & (ay[0].ct_eq(&by[0])
+                & ay[1].ct_eq(&by[1])
+                & ay[2].ct_eq(&by[2])
+                & ay[3].ct_eq(&by[3]))
+    }
+}
+
+// Constant-time equality for ProjectivePoint: normalize both to affine,
+// then compare. Both inverses are computed unconditionally so that the
+// amount of field arithmetic does not vary with the comparison result.
+impl ConstantTimeEq for ProjectivePoint {
+    fn ct_eq(&self, other: &Self) -> subtle::Choice {
+        // Normalize unconditionally so that equal/unequal inputs execute the
+        // same arithmetic sequence before the coordinate comparison.
+        let a = self.to_affine();
+        let b = other.to_affine();
+        a.ct_eq(&b)
     }
 }
 
@@ -2093,8 +2138,7 @@ mod tests {
             "BackendConfig::COFACTOR must be a single-limb value for this test"
         );
         assert_eq!(
-            COFACTOR,
-            backend_cofactor[0],
+            COFACTOR, backend_cofactor[0],
             "COFACTOR constant must match BackendConfig::COFACTOR"
         );
     }
@@ -2584,7 +2628,10 @@ mod tests {
             assert_eq!(a.y, b.y);
         }
         assert!(g.mul_fixed_schedule(&Scalar::ZERO).is_identity());
-        assert_eq!(g.mul_fixed_schedule(&Scalar::ONE).to_affine(), g.to_affine());
+        assert_eq!(
+            g.mul_fixed_schedule(&Scalar::ONE).to_affine(),
+            g.to_affine()
+        );
     }
 
     /// Regression: derived PartialEq on projective coordinates was incorrect.
@@ -2599,10 +2646,7 @@ mod tests {
         // Same affine point as p+g but with un-normalized projective coordinates.
         // Arithmetic on un-normalized points yields scaled representations.
         let scaled = three_p - g;
-        assert_eq!(
-            scaled, p,
-            "(X:Y:Z) and a scaled (λX:λY:λZ) must be equal"
-        );
+        assert_eq!(scaled, p, "(X:Y:Z) and a scaled (λX:λY:λZ) must be equal");
         // Also verify the identity: (0:1:1) is equal to itself even when scaled.
         assert_eq!(ProjectivePoint::IDENTITY, ProjectivePoint::IDENTITY);
     }
@@ -2755,9 +2799,21 @@ mod tests {
         // via From<ProjectivePoint> which asserts the subgroup.
         let one: Scalar = 1u64.into();
         let three: Scalar = 3u64.into();
-        assert_eq!(p2.mul_unchecked(&one), p2, "[1]P2 must equal P2 (no cofactor cleared)");
-        assert_eq!(p2.mul_unchecked(&three), p2, "[3]P2 must equal P2 (3 mod 2 == 1)");
-        assert_eq!(p2.mul_unchecked(&two), ProjectivePoint::IDENTITY, "[2]P2 == ID");
+        assert_eq!(
+            p2.mul_unchecked(&one),
+            p2,
+            "[1]P2 must equal P2 (no cofactor cleared)"
+        );
+        assert_eq!(
+            p2.mul_unchecked(&three),
+            p2,
+            "[3]P2 must equal P2 (3 mod 2 == 1)"
+        );
+        assert_eq!(
+            p2.mul_unchecked(&two),
+            ProjectivePoint::IDENTITY,
+            "[2]P2 == ID"
+        );
 
         // A protocol that multiplies an attacker-supplied point by a secret
         // scalar `s` will find that the result equals `P2` iff `s` is odd.
