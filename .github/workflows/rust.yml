@@ -16,7 +16,21 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install clippy
+      run: rustup component add clippy
     - name: Build
       run: cargo build --verbose
-    - name: Run tests
+    - name: Clippy (all features, all targets)
+      run: cargo clippy --all-features --all-targets -- -D warnings
+    - name: Docs
+      run: cargo doc --no-deps --all-features
+      env:
+        RUSTDOCFLAGS: -D warnings
+    - name: Run tests (default features)
       run: cargo test --verbose
+    - name: Run tests (all features)
+      run: cargo test --all-features --verbose
+    - name: Run tests (no default features)
+      run: cargo test --no-default-features --verbose
+    - name: Build benches
+      run: cargo bench --no-run

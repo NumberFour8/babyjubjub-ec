@@ -55,12 +55,15 @@ pub use taceo_ark_babyjubjub::Fq as BackendBaseField;
 pub use taceo_ark_babyjubjub::Fr as BackendScalar;
 
 // ===== Import required traits for BackendScalar operations =====
+#[cfg(test)]
+use ark_ec::CurveConfig;
+use ark_ec::PrimeGroup;
 use ark_ff::{
     fields::{AdditiveGroup, FftField, Field as ArkField, PrimeField as ArkPrimeField},
     UniformRand,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
-use elliptic_curve::{Curve, FieldBytesEncoding};
+use elliptic_curve::{Curve, PrimeCurve};
 use group::ff::{Field, PrimeField};
 use group::{Group, GroupEncoding};
 use num_traits::{One, Zero};
@@ -86,6 +89,13 @@ const SCALAR_MODULUS_LE: [u8; 32] = [
     0x0b, 0x2b, 0x30, 0xd0, 0xb6, 0x08, 0x0a, 0x37, 0x05, 0x34, 0x26, 0x5c, 0xce, 0x89, 0x0c, 0x06,
 ];
 
+/// BabyJubJub cofactor (the number of curve points per prime-order subgroup element).
+///
+/// This value is checked by the test suite against the backend's
+/// `<BackendProjective as ark_ec::CurveGroup>::Config::COFACTOR`; a backend change
+/// that altered the cofactor would fail tests.
+pub const COFACTOR: u64 = 8;
+
 impl Curve for BabyJubJub {
     type FieldBytesSize = elliptic_curve::consts::U32;
     type Uint = elliptic_curve::bigint::U256;
@@ -95,7 +105,10 @@ impl Curve for BabyJubJub {
         elliptic_curve::bigint::Odd::from_be_hex(ORDER_HEX);
 }
 
-impl FieldBytesEncoding<BabyJubJub> for elliptic_curve::bigint::U256 {}
+// `BabyJubJub::ORDER` is the order `r` of the prime-order subgroup (the scalar
+// field order), which is prime. `PrimeCurve` is a marker trait asserting exactly
+// that, so this impl is sound. It lets generic code bound on `PrimeCurve`.
+impl PrimeCurve for BabyJubJub {}
 
 // ===== AffinePoint Wrapper =====
 
@@ -198,12 +211,27 @@ impl AffinePoint {
 
 /// Projective point representation
 /// Note: BabyJubJub coordinates are in Fq (base field), not Fr (scalar field)
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ProjectivePoint {
     pub x: BackendBaseField,
     pub y: BackendBaseField,
     pub z: BackendBaseField,
 }
+
+impl PartialEq for ProjectivePoint {
+    fn eq(&self, other: &Self) -> bool {
+        // Identity shortcut: both identity match (avoids a field inversion).
+        if self.is_identity() && other.is_identity() {
+            return true;
+        }
+        // Cross-multiply to compare affine coordinates without normalization:
+        // (X1,Y1,Z1) == (X2,Y2,Z2)  <=>  X1/Z1 == X2/Z2  AND  Y1/Z1 == Y2/Z2
+        //                        <=>  X1*Z2 == X2*Z1    AND  Y1*Z2 == Y2*Z1
+        self.x * other.z == other.x * self.z && self.y * other.z == other.y * self.z
+    }
+}
+
+impl Eq for ProjectivePoint {}
 
 impl ProjectivePoint {
     /// Additive identity of the group (point at infinity)
@@ -238,6 +266,93 @@ impl ProjectivePoint {
         Self { x, y, z }
     }
 
+    /// Construct from raw field components without any validation.
+    ///
+    /// # Security
+    ///
+    /// This method performs **no** on-curve or subgroup checks. Its primary
+    /// use case is constructing known torsion points for testing or for
+    /// performance-critical internal paths where caller guarantees are
+    /// already established. **Never use this with untrusted input.**
+    ///
+    /// Unlike [`new_unchecked`](Self::new_unchecked), this method exists
+    /// because the arithmetic operators (`+`, `*`, etc.) are implemented via
+    /// `From<&ProjectivePoint> for BackendProjective`, which calls
+    /// `BackendProjective::new` and would **panic** on non-subgroup points.
+    /// This method allows constructing a `ProjectivePoint` that can safely be
+    /// used with those operators without triggering the subgroup assertion.
+    ///
+    /// # Example
+    ///
+    /// Construct the order-2 torsion element `(0 : -1 : 1)`:
+    /// ```
+    /// # use babyjubjub_ec::{ProjectivePoint, BackendBaseField};
+    /// # use ark_ff::{fields::AdditiveGroup, Field};
+    /// let p2 = ProjectivePoint::from_raw_parts(
+    ///     BackendBaseField::ZERO,
+    ///     -BackendBaseField::ONE,
+    ///     BackendBaseField::ONE,
+    /// );
+    /// ```
+    pub fn from_raw_parts(x: BackendBaseField, y: BackendBaseField, z: BackendBaseField) -> Self {
+        Self { x, y, z }
+    }
+
+    /// Convert to a backend projective point for use with backend arithmetic,
+    /// bypassing the prime-order-subgroup assertion.
+    ///
+    /// **This is a lower-level escape hatch.** The standard `Into<BackendProjective>`
+    /// conversion panics on non-subgroup points (the backend `new` constructor
+    /// asserts `is_in_correct_subgroup_assuming_on_curve`). This method constructs
+    /// the backend point from raw coordinates directly, without that assertion,
+    /// enabling arithmetic on torsion/small-subgroup points.
+    ///
+    /// Use this only when you need to operate on points that are known to be
+    /// on-curve but not in the prime-order subgroup, and only in controlled
+    /// test or internal-performance contexts. **Never use this with untrusted input.**
+    pub fn to_backend_unchecked(&self) -> BackendProjective {
+        // The backend uses *extended* twisted Edwards coordinates (X : Y : T : Z)
+        // with the invariant `T * Z == X * Y` (so that `T/Z == (X/Z)*(Y/Z)`).
+        // Our `(x, y, z)` represents the affine point `(x/z, y/z)`. Naively setting
+        // `T = x*y, Z = z` violates the invariant whenever `z != 1`, producing an
+        // *invalid* extended point whose use in the backend's addition formulas
+        // (which read `t`) would be incorrect. Scaling all coordinates by `z`
+        // restores a valid representation of the same affine point:
+        //   (x*z, y*z, x*y, z^2)
+        // because (x*z)/(z^2) = x/z, (y*z)/(z^2) = y/z, (x*y)/(z^2) = (x/z)(y/z),
+        // and the invariant holds: (x*y)*(z^2) == (x*z)*(y*z). This is
+        // inversion-free and reduces to (x, y, x*y, 1) when z == 1.
+        BackendProjective {
+            x: self.x * self.z,
+            y: self.y * self.z,
+            t: self.x * self.y,
+            z: self.z.square(),
+        }
+    }
+
+    /// Group doubling using the backend, bypassing the prime-order-subgroup
+    /// assertion (unlike [`Group::double`] which uses `From` conversions).
+    ///
+    /// This is the counterpart to [`to_backend_unchecked`](Self::to_backend_unchecked)
+    /// for the doubling operation. Use it only when you need to double a point
+    /// that is known to be on-curve but may not be in the prime-order subgroup.
+    /// **Never use this with untrusted input.**
+    pub fn double_unchecked(&self) -> Self {
+        self.to_backend_unchecked().double().into()
+    }
+
+    /// Scalar multiplication using the backend, bypassing the prime-order-subgroup
+    /// assertion (unlike the `*` operator which uses `From` conversions).
+    ///
+    /// This is the counterpart to [`to_backend_unchecked`](Self::to_backend_unchecked)
+    /// for scalar multiplication. Use it only when you need to multiply a point
+    /// that is known to be on-curve but may not be in the prime-order subgroup.
+    /// **Never use this with untrusted input.**
+    pub fn mul_unchecked(&self, scalar: &Scalar) -> Self {
+        let result = self.to_backend_unchecked() * scalar.0;
+        result.into()
+    }
+
     /// Check if this point is the identity (neutral element).
     ///
     /// BabyJubJub is a (complete) twisted Edwards curve, so there is **no**
@@ -247,7 +362,18 @@ impl ProjectivePoint {
     /// short Weierstrass implementation would — is therefore wrong and never
     /// matches a real identity produced by this API.
     pub fn is_identity(&self) -> bool {
-        !self.z.is_zero() && self.x.is_zero() && self.y == self.z
+        // Best-effort constant-time check using bitwise limb operations.
+        // The `z != 0` guard uses short-circuit (not a secret — it determines
+        // representation format, not a key-dependent value).
+        let z_nonzero = !self.z.is_zero();
+        let limbs_x = &self.x.0 .0;
+        let limbs_z = &self.z.0 .0;
+        let x_is_zero = limbs_x[0] == 0 && limbs_x[1] == 0 && limbs_x[2] == 0 && limbs_x[3] == 0;
+        let y_eq_z = self.y.0 .0[0] == limbs_z[0]
+            && self.y.0 .0[1] == limbs_z[1]
+            && self.y.0 .0[2] == limbs_z[2]
+            && self.y.0 .0[3] == limbs_z[3];
+        z_nonzero && x_is_zero && y_eq_z
     }
 
     /// Returns true iff the point is on the curve **and** in the prime-order
@@ -278,16 +404,29 @@ impl ProjectivePoint {
 
     /// Variable-time scalar multiplication `[scalar] * self`.
     ///
-    /// Uses a Montgomery ladder with a fixed iteration count and bit-mask
-    /// conditional select — there is no scalar-dependent loop length or
-    /// early-exit in this wrapper. However, see the section below for the
-    /// end-to-end timing guarantee.
+    /// Uses a fixed-length double-and-add-always loop with a bit-mask conditional
+    /// select: every iteration computes both `[2]acc` and `[2]acc + self` and
+    /// selects between them on the current scalar bit, so there is no
+    /// scalar-dependent loop length or early-exit in this wrapper. (This is the
+    /// double-and-add-always countermeasure, *not* a Montgomery ladder.) See the
+    /// `# Timing` section below for the end-to-end caveat.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `self` is in the prime-order subgroup. Each iteration adds
+    /// via the `+` operator, which converts through
+    /// `From<ProjectivePoint> for BackendProjective` and asserts subgroup
+    /// membership. For points that may be on-curve but outside the prime-order
+    /// subgroup (e.g. torsion points built with [`ProjectivePoint::new_unchecked`])
+    /// use [`ProjectivePoint::mul_unchecked`] or
+    /// [`ProjectivePoint::mul_with_cofactor_clear`] instead. The same subgroup
+    /// assertion applies to the `*` operator and [`Group::double`].
     ///
     /// # Timing
     ///
     /// This is **not** an end-to-end constant-time scalar multiplication.
-    /// The Montgomery ladder structure (fixed loop length, bit-mask conditional
-    /// swap) is constant-time at the algorithm level, but each iteration calls
+    /// The fixed loop length and bit-mask conditional select are constant-time
+    /// at the algorithm level, but each iteration calls
     /// the arkworks backend's point addition and doubling, which in turn call
     /// `ark-ff` field arithmetic. That field arithmetic uses a data-dependent
     /// conditional reduction (`Fp::subtract_modulus` via `is_geq_modulus`, a
@@ -298,7 +437,7 @@ impl ProjectivePoint {
     /// who require end-to-end constant-time scalar multiplication must use a
     /// different backend (e.g. one with bit-mask-based field reduction
     /// throughout, such as `fiat-crypto`-generated code).
-    pub fn mul_var_schedule(&self, scalar: &Scalar) -> Self {
+    pub fn mul_fixed_schedule(&self, scalar: &Scalar) -> Self {
         // Canonical little-endian bytes of the scalar (< r < 2^252).
         let bytes = scalar.to_bytes_le();
         let mut acc = Self::IDENTITY;
@@ -313,30 +452,79 @@ impl ProjectivePoint {
         acc
     }
 
-    /// Alias for [`ProjectivePoint::mul_var_schedule`].
+    /// Alias for [`ProjectivePoint::mul_fixed_schedule`].
     ///
     /// The `ct` suffix is historical and should not be interpreted as a
     /// constant-time guarantee — the underlying field arithmetic is not CT.
-    /// Prefer [`ProjectivePoint::mul_var_schedule`] in new code.
+    /// Prefer [`ProjectivePoint::mul_fixed_schedule`] in new code.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `self` is in the prime-order subgroup, exactly as
+    /// [`ProjectivePoint::mul_fixed_schedule`].
     pub fn mul_ct(&self, scalar: &Scalar) -> Self {
-        self.mul_var_schedule(scalar)
+        self.mul_fixed_schedule(scalar)
+    }
+
+    /// Scalar multiplication that additionally clears the cofactor, producing a
+    /// point guaranteed to be in the prime-order subgroup.
+    ///
+    /// BabyJubJub has cofactor 8, so every point `P` can be written as
+    /// `P = [8]Q` for a unique `Q` in the prime-order subgroup (the "subgroup
+    /// component" of `P`). Plain scalar multiplication `[s]P` preserves the
+    /// subgroup component: `Q` is multiplied by `s` but is never eliminated.
+    ///
+    /// **Security impact.** Protocols that multiply an attacker-supplied point
+    /// by a secret scalar while expecting a prime-order-subgroup result are
+    /// vulnerable to small-subgroup attacks when the attacker can control the
+    /// subgroup component of `P`. This method should be used instead of the
+    /// plain `*` operator whenever the caller needs the result to be provably
+    /// in the prime-order subgroup and the input point is not already known to
+    /// be in it (e.g., points decoded from untrusted input).
+    ///
+    /// This computes `[8s]P` using the **integer** product `8 * s`, which equals
+    /// `[8s]Q` (the torsion component, having order dividing the cofactor 8, is
+    /// annihilated by the factor of 8). It is `IDENTITY` when `8s` is a multiple
+    /// of the subgroup order `r`.
+    ///
+    /// The cofactor multiply is done over the integers, **not** in the scalar
+    /// field: `8 * s mod r` is generally *not* a multiple of 8 (`r` is odd), so
+    /// reducing modulo `r` would leave the torsion component intact and defeat
+    /// the cofactor clearing entirely.
+    pub fn mul_with_cofactor_clear(&self, scalar: &Scalar) -> Self {
+        // Build the integer 8 * s (without reducing mod r) and feed it to the
+        // backend's integer scalar multiplication. `s < r < 2^251`, so `8 * s`
+        // fits comfortably in five 64-bit limbs.
+        let s = scalar.0.into_bigint().0;
+        let mut wide = [0u64; 5];
+        let mut carry = 0u128;
+        for (i, &limb) in s.iter().enumerate() {
+            let acc = (limb as u128) * (COFACTOR as u128) + carry;
+            wide[i] = acc as u64;
+            carry = acc >> 64;
+        }
+        wide[4] = carry as u64;
+        let result = self.to_backend_unchecked().mul_bigint(wide);
+        result.into()
     }
 
     /// Convert to affine coordinates.
     ///
     /// # Panics
     ///
-    /// Panics if the point is not in valid projective coordinates (z-coordinate is zero
-    /// but the point is not the identity).
+    /// Panics if the point is not in valid projective coordinates (`z == 0`).
+    /// Invalid projective points must not be fed to this method; use
+    /// [`ProjectivePoint::is_on_curve`] to validate untrusted inputs first.
     pub fn to_affine(&self) -> AffinePoint {
-        if self.z.is_zero() {
-            AffinePoint::IDENTITY
-        } else {
-            let z_inv = self.z.inverse().expect("non-zero has inverse");
-            let x = self.x * z_inv;
-            let y = self.y * z_inv;
-            AffinePoint::new_unchecked(x, y)
-        }
+        assert!(
+            !self.z.is_zero(),
+            "invalid projective point: z-coordinate is zero"
+        );
+
+        let z_inv = self.z.inverse().expect("non-zero has inverse");
+        let x = self.x * z_inv;
+        let y = self.y * z_inv;
+        AffinePoint::new_unchecked(x, y)
     }
 }
 
@@ -451,17 +639,19 @@ impl Scalar {
     /// # Security Note
     ///
     /// This method uses the backend's `inverse()` function which implements
-    /// variable-time algorithms (extended Euclidean algorithm or similar).
-    /// This means:
+    /// a variable-time extended Euclidean algorithm. This means:
     /// - The timing may leak information about whether the input is zero
     /// - The method returns `CtOption::new(Self::ZERO, 0.into())` when input is zero
     ///
-    /// For constant-time inversion, callers should use constant-time techniques
-    /// such as conditional selection after checking `is_zero()` first.
-    /// However, note that checking `is_zero()` itself may leak timing information.
+    /// **Do not use this method with secret nonces** (e.g. the `k` value in
+    /// ECDSA signature generation). The variable-time algorithm can leak the
+    /// nonce through timing, enabling private-key recovery attacks. For
+    /// nonce inversion in signature schemes, use a constant-time modular
+    /// inversion routine instead.
     ///
-    /// For most use cases (e.g., signature verification), this non-constant-time
-    /// behavior is acceptable as the scalar is already validated to be non-zero.
+    /// For most other use cases (e.g., signature verification), the
+    /// non-constant-time behaviour is acceptable as the scalar is already
+    /// validated to be non-zero.
     pub fn invert(&self) -> CtOption<Self> {
         match self.0.inverse() {
             Some(s) => CtOption::new(Self(s), 1.into()),
@@ -502,12 +692,22 @@ impl Group for ProjectivePoint {
         // Twisted Edwards has no point at infinity: the neutral element is the
         // affine point (0, 1), i.e. projective (0 : Y : Z) with Y == Z. Testing
         // `z == 0` (a short-Weierstrass habit) never matches a real identity.
-        use subtle::Choice;
-        if !self.z.is_zero() && self.x.is_zero() && self.y == self.z {
-            Choice::from(1)
-        } else {
-            Choice::from(0)
-        }
+        //
+        // Use bitwise constant-time operations on the field BigInt limbs to
+        // avoid branching on secret-dependent values.
+        let z_nonzero = !self.z.is_zero();
+        let limbs_x = &self.x.0 .0;
+        let limbs_y = &self.y.0 .0;
+        let limbs_z = &self.z.0 .0;
+        let x_is_zero = limbs_x[0].ct_eq(&0)
+            & limbs_x[1].ct_eq(&0)
+            & limbs_x[2].ct_eq(&0)
+            & limbs_x[3].ct_eq(&0);
+        let y_eq_z = limbs_y[0].ct_eq(&limbs_z[0])
+            & limbs_y[1].ct_eq(&limbs_z[1])
+            & limbs_y[2].ct_eq(&limbs_z[2])
+            & limbs_y[3].ct_eq(&limbs_z[3]);
+        subtle::Choice::from(z_nonzero as u8) & x_is_zero & y_eq_z
     }
 
     fn double(&self) -> Self {
@@ -615,9 +815,14 @@ impl ProjectivePoint {
     /// to carry a `Result` or a custom enum variant. The current `None`
     /// contract is intentional for API surface-area reasons.
     fn from_bytes_impl(bytes: &[u8; 32], validate: bool) -> CtOption<Self> {
-        // Use the backend's deserialization which properly handles Montgomery form
+        // Use the backend's deserialization which properly handles Montgomery form.
+        // Avoiding an early return on the error path keeps the *control flow* the same
+        // for parseable and unparseable encodings. Note this does NOT make decoding
+        // constant-time: the backend's decompression (an x-coordinate sqrt) and, under
+        // `Validate::Yes`, its on-curve/subgroup checks are variable-time. Decoding is
+        // not a constant-time operation and must not be treated as one.
         let mut reader = bytes.as_ref();
-        let backend_affine = match BackendAffine::deserialize_with_mode(
+        let (backend_affine, was_ok) = match BackendAffine::deserialize_with_mode(
             &mut reader,
             Compress::Yes,
             if validate {
@@ -626,17 +831,41 @@ impl ProjectivePoint {
                 Validate::No
             },
         ) {
-            Ok(affine) => affine,
-            Err(_) => return CtOption::new(Self::IDENTITY, 0.into()),
+            Ok(affine) => (affine, true),
+            // Construct the default affine point even on failure so both branches
+            // produce a valid `our_affine` and we can defer the accept/reject decision
+            // to the `was_ok` flag instead of an early return.
+            Err(_) => (
+                BackendAffine {
+                    x: BackendBaseField::ZERO,
+                    y: BackendBaseField::ONE,
+                },
+                false,
+            ),
         };
 
-        // Convert backend affine to our affine wrapper
+        // Convert backend affine to our affine wrapper — unconditionally
         let our_affine = AffinePoint {
             x: backend_affine.x,
             y: backend_affine.y,
         };
 
-        CtOption::new(Self::from(our_affine), 1.into())
+        // Reject the non-canonical x-sign encoding. The compressed format packs an
+        // x-sign flag into bit 7 of the final byte; when `x == 0`, `x` and `-x`
+        // coincide, so both flag values would decode to the same point. The canonical
+        // encoder always emits sign bit 0 for `x == 0`, so an input with `x == 0` and
+        // the sign bit set is a second, non-canonical encoding of the same point and
+        // must be rejected to keep the encoding non-malleable. Computed branchlessly so
+        // it does not add input-dependent control flow.
+        let xl = &our_affine.x.0 .0;
+        let x_is_zero = xl[0].ct_eq(&0) & xl[1].ct_eq(&0) & xl[2].ct_eq(&0) & xl[3].ct_eq(&0);
+        let sign_bit = subtle::Choice::from((bytes[31] >> 7) & 1);
+        let canonical_sign = !(x_is_zero & sign_bit);
+
+        CtOption::new(
+            Self::from(our_affine),
+            subtle::Choice::from(was_ok as u8) & canonical_sign,
+        )
     }
 }
 
@@ -759,7 +988,7 @@ impl<'a> core::ops::Mul<&'a Scalar> for &ProjectivePoint {
     /// **Variable-time.** This (and all other `Mul<Scalar>` operator impls)
     /// delegates to the arkworks backend, whose scalar multiplication is not
     /// constant-time and can leak the scalar through timing/cache side channels.
-    /// [`ProjectivePoint::mul_var_schedule`] avoids scalar-dependent control
+    /// [`ProjectivePoint::mul_fixed_schedule`] avoids scalar-dependent control
     /// flow in this wrapper, but the underlying field arithmetic in `ark-ff`
     /// uses data-dependent conditional reduction and is not constant-time.
     fn mul(self, scalar: &'a Scalar) -> ProjectivePoint {
@@ -820,12 +1049,22 @@ impl From<&AffinePoint> for ProjectivePoint {
 }
 
 impl From<ProjectivePoint> for AffinePoint {
+    /// # Panics
+    ///
+    /// Panics if `point` has `z == 0` (an invalid projective point). See
+    /// [`ProjectivePoint::to_affine`]. Only the explicitly-unchecked constructors
+    /// ([`ProjectivePoint::new_unchecked`] / [`ProjectivePoint::from_raw_parts`])
+    /// and the derived `Default` can produce such a point; validate untrusted
+    /// input with [`ProjectivePoint::is_on_curve`] before converting.
     fn from(point: ProjectivePoint) -> Self {
         point.to_affine()
     }
 }
 
 impl From<&ProjectivePoint> for AffinePoint {
+    /// # Panics
+    ///
+    /// Panics if `point` has `z == 0`; see [`From<ProjectivePoint>`](AffinePoint).
     fn from(point: &ProjectivePoint) -> Self {
         point.to_affine()
     }
@@ -834,9 +1073,30 @@ impl From<&ProjectivePoint> for AffinePoint {
 // ===== Conversions between ProjectivePoint and BackendProjective =====
 
 impl From<ProjectivePoint> for BackendProjective {
+    /// # Panics
+    ///
+    /// Panics if `point` is on the curve but **not** in the prime-order subgroup
+    /// (the backend `BackendProjective::new` asserts subgroup membership). This is
+    /// the assertion that makes the arithmetic operators (`+`, `-`, `*`,
+    /// [`Group::double`], [`ProjectivePoint::mul_fixed_schedule`]) panic on
+    /// torsion/small-subgroup inputs. Use [`ProjectivePoint::to_backend_unchecked`]
+    /// (and the `*_unchecked` helpers) to operate on such points without panicking.
     fn from(point: ProjectivePoint) -> Self {
-        // BackendProjective uses Extended projective coordinates (x, y, t, z) where t = x * y
+        // Identity shortcut: BackendProjective::new asserts the subgroup for all
+        // non-identity points, so calling it for the identity would panic.
+        //
+        // The identity in our projective representation is any (0 : λY : λZ) with
+        // λ ≠ 0, equivalently x == 0 and y == z.  In the canonical form
+        // (0, 1, 1) both coordinates are 1; in scaled form (0, 2, 2) they are 2.
+        // Checking only x == 0 would incorrectly match the order-2 torsion element
+        // P2 = (0, -1, 1), so we require y == z as well.
         let t = point.x * point.y;
+        if point.x.is_zero() && point.y == point.z {
+            return Self::zero();
+        }
+        // For all other points (including torsion/small-subgroup points),
+        // BackendProjective::new normalizes z to 1 and checks the subgroup.
+        // For prime-order subgroup points this assert always passes.
         Self::new(point.x, point.y, t, point.z)
     }
 }
@@ -1244,6 +1504,37 @@ impl ConstantTimeEq for Scalar {
     }
 }
 
+// Constant-time equality of two base-field elements via their (Montgomery) limbs.
+// `ark-ff` stores reduced values, so equal field elements have identical limbs.
+fn fq_ct_eq(a: &BackendBaseField, b: &BackendBaseField) -> subtle::Choice {
+    let a = &a.0 .0;
+    let b = &b.0 .0;
+    a[0].ct_eq(&b[0]) & a[1].ct_eq(&b[1]) & a[2].ct_eq(&b[2]) & a[3].ct_eq(&b[3])
+}
+
+// Constant-time equality for AffinePoint: compare x and y coordinate limbs.
+impl ConstantTimeEq for AffinePoint {
+    fn ct_eq(&self, other: &Self) -> subtle::Choice {
+        fq_ct_eq(&self.x, &other.x) & fq_ct_eq(&self.y, &other.y)
+    }
+}
+
+// Constant-time equality for ProjectivePoint via cross-multiplication, matching
+// `PartialEq`: (X1:Y1:Z1) == (X2:Y2:Z2)  <=>  X1*Z2 == X2*Z1  AND  Y1*Z2 == Y2*Z1.
+// This deliberately avoids `to_affine`, which would perform a variable-time field
+// inversion (leaking the z coordinate through timing) and panic on `z == 0`. All
+// four products are computed unconditionally, so control flow does not vary with
+// the inputs, and the method is panic-free for any coordinates.
+impl ConstantTimeEq for ProjectivePoint {
+    fn ct_eq(&self, other: &Self) -> subtle::Choice {
+        let x1z2 = self.x * other.z;
+        let x2z1 = other.x * self.z;
+        let y1z2 = self.y * other.z;
+        let y2z1 = other.y * self.z;
+        fq_ct_eq(&x1z2, &x2z1) & fq_ct_eq(&y1z2, &y2z1)
+    }
+}
+
 // Implement rand_core::RngCore for Scalar if needed
 impl Scalar {
     pub fn random(mut rng: impl rand_core::RngCore) -> Self {
@@ -1290,7 +1581,9 @@ mod tests {
     fn test_add_refs() {
         let a = ProjectivePoint::GENERATOR;
         let b = ProjectivePoint::IDENTITY;
-        let result = &a + &b;
+        let a_ref = &a;
+        let b_ref = &b;
+        let result = a_ref + b_ref;
         assert_eq!(result.x, a.x);
         assert_eq!(result.y, a.y);
         assert_eq!(result.z, a.z);
@@ -1402,7 +1695,9 @@ mod tests {
         let b = ProjectivePoint::IDENTITY;
 
         // Test &T + &T
-        let result1 = &a + &b;
+        let a_ref = &a;
+        let b_ref = &b;
+        let result1 = a_ref + b_ref;
         assert_eq!(result1.x, a.x);
         assert_eq!(result1.y, a.y);
         assert_eq!(result1.z, a.z);
@@ -1639,7 +1934,7 @@ mod tests {
     /// Test Sum trait for ProjectivePoint
     #[test]
     fn test_projective_point_sum() {
-        let points = vec![
+        let points = [
             ProjectivePoint::GENERATOR,
             ProjectivePoint::GENERATOR,
             ProjectivePoint::GENERATOR,
@@ -1656,7 +1951,7 @@ mod tests {
     /// Test Sum trait for Scalar
     #[test]
     fn test_scalar_sum() {
-        let scalars = vec![Scalar::from(1u64), Scalar::from(2u64), Scalar::from(3u64)];
+        let scalars = [Scalar::from(1u64), Scalar::from(2u64), Scalar::from(3u64)];
         let sum: Scalar = scalars.into_iter().sum();
         let expected = Scalar::from(6u64);
         assert_eq!(sum.0, expected.0);
@@ -1665,7 +1960,7 @@ mod tests {
     /// Test Product trait for Scalar
     #[test]
     fn test_scalar_product() {
-        let scalars = vec![Scalar::from(2u64), Scalar::from(3u64), Scalar::from(5u64)];
+        let scalars = [Scalar::from(2u64), Scalar::from(3u64), Scalar::from(5u64)];
         let product: Scalar = scalars.into_iter().product();
         let expected = Scalar::from(30u64);
         assert_eq!(product.0, expected.0);
@@ -1904,6 +2199,24 @@ mod tests {
         // Also verify the order is non-zero and has expected properties
         // First byte in big-endian should be 0x06 (non-zero)
         assert_eq!(order_bytes[0], 0x06);
+    }
+
+    /// Verify [`COFACTOR`] matches `BackendProjective::Config::COFACTOR`.
+    ///
+    /// If the backend is updated, this test will fail and force a review of
+    /// any hardcoded cofactor-dependent logic (including [`ProjectivePoint::mul_with_cofactor_clear`]).
+    #[test]
+    fn test_cofactor_matches_backend() {
+        let backend_cofactor = <BackendProjective as ark_ec::CurveGroup>::Config::COFACTOR;
+        assert_eq!(
+            backend_cofactor.len(),
+            1,
+            "BackendConfig::COFACTOR must be a single-limb value for this test"
+        );
+        assert_eq!(
+            COFACTOR, backend_cofactor[0],
+            "COFACTOR constant must match BackendConfig::COFACTOR"
+        );
     }
 
     /// Verify the `ff` field constants actually satisfy their mathematical
@@ -2189,7 +2502,7 @@ mod tests {
     /// Test Sum trait for empty iterator
     #[test]
     fn test_scalar_sum_empty() {
-        let scalars: Vec<Scalar> = vec![];
+        let scalars: [Scalar; 0] = [];
         let sum: Scalar = scalars.into_iter().sum();
         assert_eq!(sum, Scalar::ZERO);
     }
@@ -2370,7 +2683,7 @@ mod tests {
 
     /// F4: fixed-schedule multiplication must agree with the operator.
     #[test]
-    fn test_mul_var_schedule_matches_operator() {
+    fn test_mul_fixed_schedule_matches_operator() {
         let g = ProjectivePoint::GENERATOR;
         let r_minus_1 = Scalar::ZERO - Scalar::ONE;
         let big = Scalar::from(u64::MAX) * Scalar::from(0x9e37_79b9_7f4a_7c15u64);
@@ -2385,13 +2698,33 @@ mod tests {
             big,
         ];
         for sc in cases {
-            let a = g.mul_var_schedule(&sc).to_affine();
+            let a = g.mul_fixed_schedule(&sc).to_affine();
             let b = (g * sc).to_affine();
             assert_eq!(a.x, b.x);
             assert_eq!(a.y, b.y);
         }
-        assert!(g.mul_var_schedule(&Scalar::ZERO).is_identity());
-        assert_eq!(g.mul_var_schedule(&Scalar::ONE).to_affine(), g.to_affine());
+        assert!(g.mul_fixed_schedule(&Scalar::ZERO).is_identity());
+        assert_eq!(
+            g.mul_fixed_schedule(&Scalar::ONE).to_affine(),
+            g.to_affine()
+        );
+    }
+
+    /// Regression: derived PartialEq on projective coordinates was incorrect.
+    /// (X:Y:Z) and (λX:λY:λZ) represent the same affine point for any λ≠0 and
+    /// must compare as equal. The fix uses cross-multiplication without normalization.
+    #[test]
+    fn test_projective_eq_scaled() {
+        let g = ProjectivePoint::GENERATOR;
+        // Produce a point with a non-trivial z (doubling guarantees z ≠ 1).
+        let p = g + g; // doubled generator — z is not 1
+        let three_p = p + g;
+        // Same affine point as p+g but with un-normalized projective coordinates.
+        // Arithmetic on un-normalized points yields scaled representations.
+        let scaled = three_p - g;
+        assert_eq!(scaled, p, "(X:Y:Z) and a scaled (λX:λY:λZ) must be equal");
+        // Also verify the identity: (0:1:1) is equal to itself even when scaled.
+        assert_eq!(ProjectivePoint::IDENTITY, ProjectivePoint::IDENTITY);
     }
 
     /// F6: scalar decoding must reject non-canonical (`>= r`) byte strings, so
@@ -2487,5 +2820,181 @@ mod tests {
         assert!(!bool::from(Group::is_identity(&invalid)));
         assert!(!invalid.is_on_curve());
         assert!(!invalid.is_in_prime_order_subgroup());
+    }
+
+    /// Security test: cofactor clearing.
+    ///
+    /// BabyJubJub has cofactor 8, and the torsion subgroup of the full group
+    /// `G_full ≅ Z/2 × Z/4` has maximum non-trivial order 4. A point in the
+    /// torsion subgroup is NOT in the prime-order subgroup, but plain scalar
+    /// multiplication (`*` / `mul_fixed_schedule`) does not eliminate the
+    /// torsion component:
+    ///
+    /// ```ignore
+    /// [s]P_torsion = P_torsion   (when s is odd, P_torsion has order 2)
+    /// [s]P_torsion = IDENTITY    (when s is even, P_torsion has order 2)
+    /// ```
+    ///
+    /// This leaks the *parity* of the scalar when the attacker controls
+    /// `P_torsion` — a small-subgroup attack. The correct fix is cofactor
+    /// clearing: `[8]P` projects any point onto the prime-order subgroup, and
+    /// `mul_with_cofactor_clear` applies this automatically.
+    #[test]
+    fn test_cofactor_clearing_security() {
+        // The order-2 element P2 = (0, -1) is on the curve but NOT in the
+        // prime-order subgroup. It is its own negation: 2*P2 == IDENTITY.
+        // We use new_unchecked (no on-curve / subgroup checks) and
+        // double_unchecked (avoids the BackendProjective::new subgroup assertion).
+        let p2 = ProjectivePoint::new_unchecked(
+            BackendBaseField::ZERO,
+            -BackendBaseField::ONE,
+            BackendBaseField::ONE,
+        );
+        assert!(
+            bool::from(Group::is_identity(&p2.double_unchecked())),
+            "order-2 element must double to identity"
+        );
+        assert!(!bool::from(Group::is_identity(&p2)));
+        assert!(!p2.is_in_prime_order_subgroup());
+
+        // Verify: [2]P2 == IDENTITY (order 2 element).
+        let two: Scalar = 2u64.into();
+        assert_eq!(
+            p2.mul_unchecked(&two),
+            ProjectivePoint::IDENTITY,
+            "order-2 element must double to identity"
+        );
+
+        // --- Without cofactor clearing ---
+        //
+        // [1]P2 == P2    (odd scalar: torsion component preserved)
+        // [3]P2 == P2    (odd scalar: 3 mod 2 == 1)
+        // [2]P2 == ID    (even scalar: collapses to identity)
+        //
+        // We use mul_unchecked instead of * because the * operator converts
+        // via From<ProjectivePoint> which asserts the subgroup.
+        let one: Scalar = 1u64.into();
+        let three: Scalar = 3u64.into();
+        assert_eq!(
+            p2.mul_unchecked(&one),
+            p2,
+            "[1]P2 must equal P2 (no cofactor cleared)"
+        );
+        assert_eq!(
+            p2.mul_unchecked(&three),
+            p2,
+            "[3]P2 must equal P2 (3 mod 2 == 1)"
+        );
+        assert_eq!(
+            p2.mul_unchecked(&two),
+            ProjectivePoint::IDENTITY,
+            "[2]P2 == ID"
+        );
+
+        // A protocol that multiplies an attacker-supplied point by a secret
+        // scalar `s` will find that the result equals `P2` iff `s` is odd.
+        // This parity leak is a small-subgroup attack vector.
+
+        // --- With cofactor clearing ---
+        //
+        // [8]P2 projects P2 onto the prime-order subgroup:
+        //   P2 = [8]Q  where Q = P2 (since 2*P2 == ID, 4*P2 == ID too,
+        //   and 8 is a multiple of the order of P2, so Q = IDENTITY).
+        // Therefore [1]([8]P2) == IDENTITY (not P2), regardless of scalar parity.
+        let eight: Scalar = 8u64.into();
+        let p2_projected = p2.mul_unchecked(&eight);
+        assert_eq!(
+            p2_projected,
+            ProjectivePoint::IDENTITY,
+            "[8]P2 must project to identity (P2 has order dividing 8)"
+        );
+
+        // [1]([8]P2) == ID — the torsion component is gone.
+        // p2_projected is the identity (y == z), so * on it is safe.
+        assert_eq!(
+            p2_projected * one,
+            ProjectivePoint::IDENTITY,
+            "cofactor-cleared point must stay at identity"
+        );
+
+        // [3]([8]P2) == ID — even with an odd scalar.
+        assert_eq!(
+            p2_projected * three,
+            ProjectivePoint::IDENTITY,
+            "cofactor-cleared point stays at identity under any scalar"
+        );
+
+        // `mul_with_cofactor_clear` applies the same cofactor multiplication.
+        assert_eq!(
+            p2.mul_with_cofactor_clear(&one),
+            ProjectivePoint::IDENTITY,
+            "mul_with_cofactor_clear must eliminate the torsion component"
+        );
+        assert_eq!(
+            p2.mul_with_cofactor_clear(&three),
+            ProjectivePoint::IDENTITY,
+            "mul_with_cofactor_clear must work regardless of scalar parity"
+        );
+
+        // --- Prime-order subgroup points are unaffected ---
+        //
+        // For a generator G in the prime-order subgroup, [8]G is still in the
+        // subgroup (since the subgroup is closed under scalar multiplication
+        // by 8).  The result may have a non-unit z in the backend representation,
+        // so we compare the identity check rather than raw coordinate equality.
+        let g = ProjectivePoint::GENERATOR;
+        let g_projected = g * eight;
+        assert!(
+            g_projected.is_in_prime_order_subgroup(),
+            "[8]G must still be in the prime-order subgroup"
+        );
+        // [8]([8]G) == [8]G (idempotent: already in the subgroup).
+        let g_proj_idem = g_projected * eight;
+        assert!(
+            g_proj_idem.is_in_prime_order_subgroup(),
+            "[8]([8]G) must still be in the prime-order subgroup (subgroup closure)"
+        );
+
+        // --- Regression: cofactor clearing must use the INTEGER 8*s ---
+        //
+        // For a large scalar the integer product 8*s exceeds r, and 8*s mod r is
+        // generally NOT a multiple of 8 (r is odd). Cofactor clearing therefore
+        // must multiply by the integer 8*s, never by 8*s reduced mod r. Take
+        // s = r-1: then 8*s mod r = r-8, which is ODD (r ≡ 1 mod 8), so the buggy
+        // mod-r version computes [r-8]P2 = P2 (torsion survives), whereas the
+        // correct integer version computes [8(r-1)]P2 = IDENTITY.
+        let r_minus_1 = Scalar::ZERO - Scalar::ONE;
+        let cleared = p2.mul_with_cofactor_clear(&r_minus_1);
+        assert_eq!(
+            cleared,
+            ProjectivePoint::IDENTITY,
+            "cofactor clearing must use the integer 8*s, not 8*s mod r"
+        );
+
+        // Functional contract on a prime-order point with a large (wrapping)
+        // scalar: mul_with_cofactor_clear(s) == [8s]G computed via the operators,
+        // and the result stays in the prime-order subgroup.
+        let s_big = Scalar::from(0x9e37_79b9_7f4a_7c15u64) * Scalar::from(u64::MAX);
+        assert_eq!(
+            g.mul_with_cofactor_clear(&s_big).to_affine(),
+            (g * (s_big * eight)).to_affine(),
+            "mul_with_cofactor_clear(s) must equal [8s]G on a subgroup point"
+        );
+        assert!(
+            g.mul_with_cofactor_clear(&s_big).is_in_prime_order_subgroup(),
+            "cofactor-cleared result must be in the prime-order subgroup"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid projective point: z-coordinate is zero")]
+    fn test_projective_to_affine_rejects_zero_z() {
+        let invalid = ProjectivePoint::new_unchecked(
+            BackendBaseField::ZERO,
+            BackendBaseField::ONE,
+            BackendBaseField::ZERO,
+        );
+
+        let _ = invalid.to_affine();
     }
 }

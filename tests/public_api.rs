@@ -2,7 +2,7 @@
 //!
 //! These tests exercise only the public API and can be run as integration tests.
 
-use babyjubjub_ec::{AffinePoint, GroupRepr, ProjectivePoint, Scalar};
+use babyjubjub_ec::{AffinePoint, BabyJubJub, BackendBaseField, GroupRepr, ProjectivePoint, Scalar};
 use group::ff::{Field, PrimeField};
 use group::{Group, GroupEncoding};
 use subtle::{ConditionallySelectable, ConstantTimeEq};
@@ -12,13 +12,13 @@ use subtle::{ConditionallySelectable, ConstantTimeEq};
 #[test]
 fn test_affine_point_identity() {
     let identity = AffinePoint::IDENTITY;
-    assert!(bool::from(identity.is_identity()));
+    assert!(identity.is_identity());
 }
 
 #[test]
 fn test_projective_point_identity() {
     let identity = ProjectivePoint::IDENTITY;
-    assert!(bool::from(identity.is_identity()));
+    assert!(identity.is_identity());
 }
 
 #[test]
@@ -60,7 +60,9 @@ fn test_add_identity_projective() {
 fn test_add_refs() {
     let a = ProjectivePoint::GENERATOR;
     let b = ProjectivePoint::IDENTITY;
-    let result = &a + &b;
+    let a_ref = &a;
+    let b_ref = &b;
+    let result = a_ref + b_ref;
     assert_eq!(result, a);
 }
 
@@ -68,7 +70,9 @@ fn test_add_refs() {
 fn test_point_ops_with_refs() {
     let a = ProjectivePoint::GENERATOR;
     let b = ProjectivePoint::IDENTITY;
-    let result1 = &a + &b;
+    let a_ref = &a;
+    let b_ref = &b;
+    let result1 = a_ref + b_ref;
     assert_eq!(result1, a);
 }
 
@@ -82,7 +86,7 @@ fn test_projective_point_neg_ref() {
 
 #[test]
 fn test_projective_point_sum() {
-    let points = vec![
+    let points = [
         ProjectivePoint::GENERATOR,
         ProjectivePoint::GENERATOR,
         ProjectivePoint::GENERATOR,
@@ -110,7 +114,7 @@ fn test_scalar_mult_one() {
 }
 
 #[test]
-fn test_mul_var_schedule_matches_operator() {
+fn test_mul_fixed_schedule_matches_operator() {
     let g = ProjectivePoint::GENERATOR;
     let r_minus_1 = Scalar::ZERO - Scalar::ONE;
     let big = Scalar::from(u64::MAX) * Scalar::from(0x9e37_79b9_7f4a_7c15u64);
@@ -125,13 +129,16 @@ fn test_mul_var_schedule_matches_operator() {
         big,
     ];
     for sc in cases {
-        let a = g.mul_var_schedule(&sc).to_affine();
+        let a = g.mul_fixed_schedule(&sc).to_affine();
         let b = (g * sc).to_affine();
         assert_eq!(a.x, b.x);
         assert_eq!(a.y, b.y);
     }
-    assert!(g.mul_var_schedule(&Scalar::ZERO).is_identity());
-    assert_eq!(g.mul_var_schedule(&Scalar::ONE).to_affine(), g.to_affine());
+    assert!(g.mul_fixed_schedule(&Scalar::ZERO).is_identity());
+    assert_eq!(
+        g.mul_fixed_schedule(&Scalar::ONE).to_affine(),
+        g.to_affine()
+    );
 }
 
 // ==================== Scalar Field Tests ====================
@@ -242,7 +249,7 @@ fn test_scalar_is_one() {
 
 #[test]
 fn test_scalar_sum() {
-    let scalars = vec![Scalar::from(1u64), Scalar::from(2u64), Scalar::from(3u64)];
+    let scalars = [Scalar::from(1u64), Scalar::from(2u64), Scalar::from(3u64)];
     let sum: Scalar = scalars.into_iter().sum();
     let expected = Scalar::from(6u64);
     assert_eq!(sum, expected);
@@ -250,7 +257,7 @@ fn test_scalar_sum() {
 
 #[test]
 fn test_scalar_product() {
-    let scalars = vec![Scalar::from(2u64), Scalar::from(3u64), Scalar::from(5u64)];
+    let scalars = [Scalar::from(2u64), Scalar::from(3u64), Scalar::from(5u64)];
     let product: Scalar = scalars.into_iter().product();
     let expected = Scalar::from(30u64);
     assert_eq!(product, expected);
@@ -258,7 +265,7 @@ fn test_scalar_product() {
 
 #[test]
 fn test_scalar_sum_empty() {
-    let scalars: Vec<Scalar> = vec![];
+    let scalars: [Scalar; 0] = [];
     let sum: Scalar = scalars.into_iter().sum();
     assert_eq!(sum, Scalar::ZERO);
 }
@@ -584,14 +591,10 @@ fn test_group_repr_as_mut() {
 #[test]
 fn test_on_curve_and_subgroup_helpers() {
     // Generator is on-curve and in the prime-order subgroup
-    assert!(bool::from(AffinePoint::GENERATOR.is_on_curve()));
-    assert!(bool::from(
-        AffinePoint::GENERATOR.is_in_prime_order_subgroup()
-    ));
-    assert!(bool::from(
-        ProjectivePoint::GENERATOR.is_in_prime_order_subgroup()
-    ));
-    assert!(bool::from(ProjectivePoint::GENERATOR.is_on_curve()));
+    assert!(AffinePoint::GENERATOR.is_on_curve());
+    assert!(AffinePoint::GENERATOR.is_in_prime_order_subgroup());
+    assert!(ProjectivePoint::GENERATOR.is_in_prime_order_subgroup());
+    assert!(ProjectivePoint::GENERATOR.is_on_curve());
 
     // Valid point via new (checked constructor)
     let g = AffinePoint::GENERATOR;
@@ -635,4 +638,219 @@ fn test_scalar_capacity() {
 #[test]
 fn test_scalar_s() {
     assert_eq!(Scalar::S, 4);
+}
+
+// ==================== Cofactor Clearing Tests ====================
+
+#[test]
+fn test_mul_with_cofactor_clear_matches_eight_s_on_subgroup_point() {
+    // On a prime-order point, mul_with_cofactor_clear(s) == [8s]P for any scalar,
+    // including large ones where the integer 8*s wraps past r. Test both a z==1
+    // base (GENERATOR) and a z!=1 base (G+G+G) so the to_backend_unchecked
+    // extended-coordinate path is exercised for non-unit z.
+    let g = ProjectivePoint::GENERATOR;
+    let g3 = g + g + g; // in the subgroup, but z != 1
+    let eight = Scalar::from(8u64);
+    for base in [g, g3] {
+        for s in [
+            Scalar::from(1u64),
+            Scalar::from(7u64),
+            Scalar::from(123456u64),
+            Scalar::from(u64::MAX) * Scalar::from(0x9e37_79b9_7f4a_7c15u64),
+            Scalar::ZERO - Scalar::ONE, // r - 1: 8*s wraps
+        ] {
+            let cleared = base.mul_with_cofactor_clear(&s);
+            assert_eq!(
+                cleared.to_affine(),
+                (base * (s * eight)).to_affine(),
+                "mul_with_cofactor_clear(s) must equal [8s]P"
+            );
+            assert!(
+                cleared.is_in_prime_order_subgroup(),
+                "result must be in the prime-order subgroup"
+            );
+        }
+    }
+}
+
+// ==================== Constant-Time Equality Tests ====================
+
+#[test]
+fn test_ct_eq_projective_scaled_and_identity() {
+    let g = ProjectivePoint::GENERATOR;
+    // A scaled (non-unit-z) representation of the same point must compare equal.
+    let p = g + g; // z != 1
+    let scaled = (p + g) - g; // same affine point as p, un-normalized
+    assert!(bool::from(p.ct_eq(&scaled)));
+    assert!(!bool::from(p.ct_eq(&g)));
+    // Identity in two representations.
+    assert!(bool::from(
+        ProjectivePoint::IDENTITY.ct_eq(&(g + (-g)))
+    ));
+}
+
+#[test]
+fn test_ct_eq_projective_does_not_panic_on_zero_z() {
+    // A z==0 point is reachable via new_unchecked / Default. ct_eq must not panic
+    // (the cross-multiplication implementation needs no inversion).
+    let zero = BackendBaseField::from(0u64);
+    let one = BackendBaseField::from(1u64);
+    let invalid = ProjectivePoint::new_unchecked(zero, one, zero);
+    // Comparing equal invalid points returns true; comparing to the generator false.
+    assert!(bool::from(invalid.ct_eq(&invalid)));
+    assert!(!bool::from(invalid.ct_eq(&ProjectivePoint::GENERATOR)));
+    // Default is also z==0 and must not panic.
+    let _ = ProjectivePoint::default().ct_eq(&ProjectivePoint::default());
+}
+
+// ==================== Encoding Canonicality / Malleability Tests ====================
+
+#[test]
+fn test_from_bytes_rejects_noncanonical_identity_sign_bit() {
+    // The identity (x==0) has its x-sign flag in bit 7 of the last byte. Since
+    // x == -x == 0, an encoding with that bit set is a second, non-canonical
+    // encoding of the identity and must be rejected (non-malleability).
+    let canonical = ProjectivePoint::IDENTITY.to_bytes();
+    assert_eq!(canonical.as_ref()[31] & 0x80, 0, "canonical identity has sign bit 0");
+    // The canonical identity still decodes.
+    assert!(bool::from(ProjectivePoint::from_bytes(&canonical).is_some()));
+
+    let mut malleated = canonical;
+    malleated.0[31] |= 0x80;
+    assert!(
+        bool::from(ProjectivePoint::from_bytes(&malleated).is_none()),
+        "identity with x-sign bit set must be rejected by from_bytes"
+    );
+    assert!(
+        bool::from(ProjectivePoint::from_bytes_unchecked(&malleated).is_none()),
+        "identity with x-sign bit set must be rejected by from_bytes_unchecked too"
+    );
+}
+
+// ==================== is_on_curve (projective, z != 1) Tests ====================
+
+#[test]
+fn test_is_on_curve_scaled_projective() {
+    // A genuine scaled projective point (z != 1) on the curve returns true.
+    let p = ProjectivePoint::GENERATOR + ProjectivePoint::GENERATOR;
+    assert!(p.is_on_curve());
+    // Perturbing a coordinate takes it off the curve (exercises the false branch
+    // of the projective curve equation with z != 1).
+    let bad = ProjectivePoint::new_unchecked(p.x + BackendBaseField::from(1u64), p.y, p.z);
+    assert!(!bad.is_on_curve());
+}
+
+// ==================== Random Point Tests ====================
+
+#[test]
+fn test_group_random_is_in_prime_order_subgroup() {
+    use rand::{rngs::StdRng, SeedableRng};
+    let mut rng = StdRng::seed_from_u64(7);
+    let mut seen_distinct = false;
+    let first = <ProjectivePoint as Group>::random(&mut rng);
+    for _ in 0..16 {
+        let p = <ProjectivePoint as Group>::random(&mut rng);
+        assert!(
+            p.is_in_prime_order_subgroup(),
+            "Group::random must yield a prime-order-subgroup point"
+        );
+        if !bool::from(p.ct_eq(&first)) {
+            seen_distinct = true;
+        }
+    }
+    assert!(seen_distinct, "random must produce distinct points");
+}
+
+// ==================== mul_ct Alias Test ====================
+
+#[test]
+fn test_mul_ct_matches_mul_fixed_schedule() {
+    let g = ProjectivePoint::GENERATOR;
+    for s in [Scalar::ZERO, Scalar::ONE, Scalar::from(42u64), Scalar::ZERO - Scalar::ONE] {
+        assert_eq!(
+            g.mul_ct(&s).to_affine(),
+            g.mul_fixed_schedule(&s).to_affine()
+        );
+    }
+}
+
+// ==================== PrimeField Repr Round-Trip Tests ====================
+
+#[test]
+fn test_prime_field_repr_round_trip() {
+    for s in [Scalar::ZERO, Scalar::ONE, Scalar::from(42u64), Scalar::ZERO - Scalar::ONE] {
+        let repr = s.to_repr();
+        let back = Scalar::from_repr(repr);
+        assert!(bool::from(back.is_some()));
+        assert_eq!(back.unwrap(), s);
+    }
+    // from_repr rejects a non-canonical (>= r) encoding.
+    assert!(bool::from(Scalar::from_repr([0xFFu8; 32]).is_none()));
+}
+
+// ==================== Assign-Operator Tests ====================
+
+#[test]
+fn test_scalar_assign_operators() {
+    let a = Scalar::from(20u64);
+    let b = Scalar::from(7u64);
+
+    let mut x = a;
+    x += b;
+    assert_eq!(x, a + b);
+    let mut x = a;
+    x += &b;
+    assert_eq!(x, a + b);
+
+    let mut x = a;
+    x -= b;
+    assert_eq!(x, a - b);
+    let mut x = a;
+    x -= &b;
+    assert_eq!(x, a - b);
+
+    let mut x = a;
+    x *= b;
+    assert_eq!(x, a * b);
+    let mut x = a;
+    x *= &b;
+    assert_eq!(x, a * b);
+}
+
+#[test]
+fn test_projective_assign_operators() {
+    let g = ProjectivePoint::GENERATOR;
+    let s = Scalar::from(5u64);
+
+    let mut p = g;
+    p += g;
+    assert_eq!(p, g + g);
+    let mut p = g;
+    p += &g;
+    assert_eq!(p, g + g);
+
+    let mut p = g + g;
+    p -= g;
+    assert_eq!(p, g);
+    let mut p = g + g;
+    p -= &g;
+    assert_eq!(p, g);
+
+    let mut p = g;
+    p *= s;
+    assert_eq!(p, g * s);
+    let mut p = g;
+    p *= &s;
+    assert_eq!(p, g * s);
+}
+
+// ==================== PrimeCurve Marker Test ====================
+
+#[test]
+fn test_babyjubjub_implements_prime_curve() {
+    // Compile-time check that BabyJubJub satisfies the PrimeCurve bound, plus a
+    // sanity check that its ORDER constant is exposed via Curve.
+    fn assert_prime_curve<C: elliptic_curve::PrimeCurve>() {}
+    assert_prime_curve::<BabyJubJub>();
+    let _ = <BabyJubJub as elliptic_curve::Curve>::ORDER;
 }
