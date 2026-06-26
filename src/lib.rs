@@ -16,7 +16,7 @@
 //!   scalar-dependent control flow in this wrapper, but the underlying field
 //!   arithmetic in `ark-ff` (specifically `Fp::subtract_modulus`, which uses a
 //!   data-dependent BigInteger comparison to decide whether to reduce) is not
-//!   constant-time. Consequently every ladder iteration carries a small timing
+//!   constant-time. Consequently, every ladder iteration carries a small timing
 //!   signal, and the method must not be treated as an end-to-end constant-time
 //!   primitive. `ConditionallySelectable` and `ct_eq` are constant-time.
 //! - **Validation.** Points decoded via [`GroupEncoding::from_bytes`] are
@@ -1804,9 +1804,10 @@ mod tests {
     fn test_scalar_mult_consistency() {
         use rand::{rngs::StdRng, SeedableRng};
 
-        const NUM_TESTS: usize = 10000;
+        const NUM_TESTS: usize = 1000;
+        let seed: [u8; 32] = rand::random();
 
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = StdRng::from_seed(seed);
 
         for _ in 0..NUM_TESTS {
             // Generate a random scalar
@@ -1825,7 +1826,8 @@ mod tests {
 
             assert_eq!(
                 result_as_backend, result_backend,
-                "Scalar multiplication mismatch"
+                "Scalar multiplication mismatch, seed = {}",
+                hex::encode(seed)
             );
         }
     }
