@@ -1,6 +1,6 @@
 [package]
 name = "babyjubjub-ec"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 license = "GPL-3.0"
 description = "BabyJubJub elliptic curve implementation wrapped in elliptic-curve traits"
@@ -35,6 +35,7 @@ ark-ec = { version = "0.5", default-features = false }
 ark-serialize = { version = "0.5", default-features = false }
 
 [features]
+hazmat = []
 default = ["std"]
 std = [
     "elliptic-curve/std",

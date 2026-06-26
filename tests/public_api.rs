@@ -691,11 +691,11 @@ fn test_ct_eq_projective_scaled_and_identity() {
 
 #[test]
 fn test_ct_eq_projective_does_not_panic_on_zero_z() {
-    // A z==0 point is reachable via new_unchecked / Default. ct_eq must not panic
+    // A z==0 point is reachable via struct instantiation / Default. ct_eq must not panic
     // (the cross-multiplication implementation needs no inversion).
     let zero = BackendBaseField::from(0u64);
     let one = BackendBaseField::from(1u64);
-    let invalid = ProjectivePoint::new_unchecked(zero, one, zero);
+    let invalid = ProjectivePoint { x: zero, y: one, z: zero };
     // Comparing equal invalid points returns true; comparing to the generator false.
     assert!(bool::from(invalid.ct_eq(&invalid)));
     assert!(!bool::from(invalid.ct_eq(&ProjectivePoint::GENERATOR)));
@@ -736,7 +736,7 @@ fn test_is_on_curve_scaled_projective() {
     assert!(p.is_on_curve());
     // Perturbing a coordinate takes it off the curve (exercises the false branch
     // of the projective curve equation with z != 1).
-    let bad = ProjectivePoint::new_unchecked(p.x + BackendBaseField::from(1u64), p.y, p.z);
+    let bad = ProjectivePoint { x: p.x + BackendBaseField::from(1u64), y: p.y, z: p.z };
     assert!(!bad.is_on_curve());
 }
 
