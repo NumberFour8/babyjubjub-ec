@@ -758,7 +758,7 @@ fn test_is_on_curve_scaled_projective() {
 
 #[test]
 fn test_group_random_is_in_prime_order_subgroup() {
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
     let mut rng = StdRng::seed_from_u64(7);
     let mut seen_distinct = false;
     let first = <ProjectivePoint as Group>::random(&mut rng);

@@ -1,5 +1,5 @@
 use babyjubjub_ec::{ProjectivePoint, Scalar};
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 fn bench_scalar_mult_256bit(c: &mut Criterion) {
     c.bench_function("scalar_mult_256bit", |b| {

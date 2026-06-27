@@ -260,11 +260,13 @@ impl ProjectivePoint {
     //
     // This is for internal/test use only.
     #[allow(dead_code)]
-    pub(crate) fn new_unchecked(x: BackendBaseField, y: BackendBaseField, z: BackendBaseField) -> Self {
+    pub(crate) fn new_unchecked(
+        x: BackendBaseField,
+        y: BackendBaseField,
+        z: BackendBaseField,
+    ) -> Self {
         Self { x, y, z }
     }
-
-
 
     /// Internal method to convert to a backend projective point without validation.
     pub(crate) fn to_backend_unvalidated(self) -> BackendProjective {
@@ -315,13 +317,13 @@ impl ProjectivePoint {
         // The `z != 0` guard uses short-circuit (not a secret — it determines
         // a representation format, not a key-dependent value).
         let z_nonzero = !self.z.is_zero();
-        let limbs_x = &self.x.0 .0;
-        let limbs_z = &self.z.0 .0;
+        let limbs_x = &self.x.0.0;
+        let limbs_z = &self.z.0.0;
         let x_is_zero = limbs_x[0] == 0 && limbs_x[1] == 0 && limbs_x[2] == 0 && limbs_x[3] == 0;
-        let y_eq_z = self.y.0 .0[0] == limbs_z[0]
-            && self.y.0 .0[1] == limbs_z[1]
-            && self.y.0 .0[2] == limbs_z[2]
-            && self.y.0 .0[3] == limbs_z[3];
+        let y_eq_z = self.y.0.0[0] == limbs_z[0]
+            && self.y.0.0[1] == limbs_z[1]
+            && self.y.0.0[2] == limbs_z[2]
+            && self.y.0.0[3] == limbs_z[3];
         z_nonzero && x_is_zero && y_eq_z
     }
 
@@ -647,9 +649,9 @@ impl Group for ProjectivePoint {
         // Use bitwise constant-time operations on the field BigInt limbs to
         // avoid branching on secret-dependent values.
         let z_nonzero = !self.z.is_zero();
-        let limbs_x = &self.x.0 .0;
-        let limbs_y = &self.y.0 .0;
-        let limbs_z = &self.z.0 .0;
+        let limbs_x = &self.x.0.0;
+        let limbs_y = &self.y.0.0;
+        let limbs_z = &self.z.0.0;
         let x_is_zero = limbs_x[0].ct_eq(&0)
             & limbs_x[1].ct_eq(&0)
             & limbs_x[2].ct_eq(&0)
@@ -672,18 +674,18 @@ impl Group for ProjectivePoint {
 impl ConditionallySelectable for ProjectivePoint {
     fn conditional_select(a: &Self, b: &Self, choice: subtle::Choice) -> Self {
         // Use conditional_select on the underlying BigInt arrays (u64 arrays)
-        let x_limb0 = u64::conditional_select(&a.x.0 .0[0], &b.x.0 .0[0], choice);
-        let x_limb1 = u64::conditional_select(&a.x.0 .0[1], &b.x.0 .0[1], choice);
-        let x_limb2 = u64::conditional_select(&a.x.0 .0[2], &b.x.0 .0[2], choice);
-        let x_limb3 = u64::conditional_select(&a.x.0 .0[3], &b.x.0 .0[3], choice);
-        let y_limb0 = u64::conditional_select(&a.y.0 .0[0], &b.y.0 .0[0], choice);
-        let y_limb1 = u64::conditional_select(&a.y.0 .0[1], &b.y.0 .0[1], choice);
-        let y_limb2 = u64::conditional_select(&a.y.0 .0[2], &b.y.0 .0[2], choice);
-        let y_limb3 = u64::conditional_select(&a.y.0 .0[3], &b.y.0 .0[3], choice);
-        let z_limb0 = u64::conditional_select(&a.z.0 .0[0], &b.z.0 .0[0], choice);
-        let z_limb1 = u64::conditional_select(&a.z.0 .0[1], &b.z.0 .0[1], choice);
-        let z_limb2 = u64::conditional_select(&a.z.0 .0[2], &b.z.0 .0[2], choice);
-        let z_limb3 = u64::conditional_select(&a.z.0 .0[3], &b.z.0 .0[3], choice);
+        let x_limb0 = u64::conditional_select(&a.x.0.0[0], &b.x.0.0[0], choice);
+        let x_limb1 = u64::conditional_select(&a.x.0.0[1], &b.x.0.0[1], choice);
+        let x_limb2 = u64::conditional_select(&a.x.0.0[2], &b.x.0.0[2], choice);
+        let x_limb3 = u64::conditional_select(&a.x.0.0[3], &b.x.0.0[3], choice);
+        let y_limb0 = u64::conditional_select(&a.y.0.0[0], &b.y.0.0[0], choice);
+        let y_limb1 = u64::conditional_select(&a.y.0.0[1], &b.y.0.0[1], choice);
+        let y_limb2 = u64::conditional_select(&a.y.0.0[2], &b.y.0.0[2], choice);
+        let y_limb3 = u64::conditional_select(&a.y.0.0[3], &b.y.0.0[3], choice);
+        let z_limb0 = u64::conditional_select(&a.z.0.0[0], &b.z.0.0[0], choice);
+        let z_limb1 = u64::conditional_select(&a.z.0.0[1], &b.z.0.0[1], choice);
+        let z_limb2 = u64::conditional_select(&a.z.0.0[2], &b.z.0.0[2], choice);
+        let z_limb3 = u64::conditional_select(&a.z.0.0[3], &b.z.0.0[3], choice);
 
         Self {
             x: BackendBaseField::new_unchecked(ark_ff::BigInt([
@@ -808,7 +810,7 @@ impl ProjectivePoint {
         // the sign bit set is a second, non-canonical encoding of the same point and
         // must be rejected to keep the encoding non-malleable. Computed branchlessly so
         // it does not add input-dependent control flow.
-        let xl = &our_affine.x.0 .0;
+        let xl = &our_affine.x.0.0;
         let x_is_zero = xl[0].ct_eq(&0) & xl[1].ct_eq(&0) & xl[2].ct_eq(&0) & xl[3].ct_eq(&0);
         let sign_bit = subtle::Choice::from((bytes[31] >> 7) & 1);
         let canonical_sign = !(x_is_zero & sign_bit);
@@ -1089,14 +1091,14 @@ impl<'a> From<&'a BackendProjective> for ProjectivePoint {
 impl ConditionallySelectable for AffinePoint {
     fn conditional_select(a: &Self, b: &Self, choice: subtle::Choice) -> Self {
         // Use conditional_select on the underlying BigInt arrays (u64 arrays)
-        let x_limb0 = u64::conditional_select(&a.x.0 .0[0], &b.x.0 .0[0], choice);
-        let x_limb1 = u64::conditional_select(&a.x.0 .0[1], &b.x.0 .0[1], choice);
-        let x_limb2 = u64::conditional_select(&a.x.0 .0[2], &b.x.0 .0[2], choice);
-        let x_limb3 = u64::conditional_select(&a.x.0 .0[3], &b.x.0 .0[3], choice);
-        let y_limb0 = u64::conditional_select(&a.y.0 .0[0], &b.y.0 .0[0], choice);
-        let y_limb1 = u64::conditional_select(&a.y.0 .0[1], &b.y.0 .0[1], choice);
-        let y_limb2 = u64::conditional_select(&a.y.0 .0[2], &b.y.0 .0[2], choice);
-        let y_limb3 = u64::conditional_select(&a.y.0 .0[3], &b.y.0 .0[3], choice);
+        let x_limb0 = u64::conditional_select(&a.x.0.0[0], &b.x.0.0[0], choice);
+        let x_limb1 = u64::conditional_select(&a.x.0.0[1], &b.x.0.0[1], choice);
+        let x_limb2 = u64::conditional_select(&a.x.0.0[2], &b.x.0.0[2], choice);
+        let x_limb3 = u64::conditional_select(&a.x.0.0[3], &b.x.0.0[3], choice);
+        let y_limb0 = u64::conditional_select(&a.y.0.0[0], &b.y.0.0[0], choice);
+        let y_limb1 = u64::conditional_select(&a.y.0.0[1], &b.y.0.0[1], choice);
+        let y_limb2 = u64::conditional_select(&a.y.0.0[2], &b.y.0.0[2], choice);
+        let y_limb3 = u64::conditional_select(&a.y.0.0[3], &b.y.0.0[3], choice);
 
         Self {
             x: BackendBaseField::new_unchecked(ark_ff::BigInt([
@@ -1193,10 +1195,10 @@ impl PrimeField for Scalar {
 impl ConditionallySelectable for Scalar {
     fn conditional_select(a: &Self, b: &Self, choice: subtle::Choice) -> Self {
         // Use conditional_select on the underlying BigInt arrays (u64 arrays)
-        let limb0 = u64::conditional_select(&a.0 .0 .0[0], &b.0 .0 .0[0], choice);
-        let limb1 = u64::conditional_select(&a.0 .0 .0[1], &b.0 .0 .0[1], choice);
-        let limb2 = u64::conditional_select(&a.0 .0 .0[2], &b.0 .0 .0[2], choice);
-        let limb3 = u64::conditional_select(&a.0 .0 .0[3], &b.0 .0 .0[3], choice);
+        let limb0 = u64::conditional_select(&a.0.0.0[0], &b.0.0.0[0], choice);
+        let limb1 = u64::conditional_select(&a.0.0.0[1], &b.0.0.0[1], choice);
+        let limb2 = u64::conditional_select(&a.0.0.0[2], &b.0.0.0[2], choice);
+        let limb3 = u64::conditional_select(&a.0.0.0[3], &b.0.0.0[3], choice);
 
         Self(BackendScalar::new_unchecked(ark_ff::BigInt([
             limb0, limb1, limb2, limb3,
@@ -1455,8 +1457,8 @@ impl ConstantTimeEq for Scalar {
         // Use constant-time comparison on the underlying BigInt limbs
         // Each limb comparison is constant-time, and we combine them with &
         // which is implemented as bitwise AND (constant-time)
-        let a = &self.0 .0 .0;
-        let b = &other.0 .0 .0;
+        let a = &self.0.0.0;
+        let b = &other.0.0.0;
 
         // CT comparison: all limbs must be equal
         a[0].ct_eq(&b[0]) & a[1].ct_eq(&b[1]) & a[2].ct_eq(&b[2]) & a[3].ct_eq(&b[3])
@@ -1466,8 +1468,8 @@ impl ConstantTimeEq for Scalar {
 // Constant-time equality of two base-field elements via their (Montgomery) limbs.
 // `ark-ff` stores reduced values, so equal field elements have identical limbs.
 fn fq_ct_eq(a: &BackendBaseField, b: &BackendBaseField) -> subtle::Choice {
-    let a = &a.0 .0;
-    let b = &b.0 .0;
+    let a = &a.0.0;
+    let b = &b.0.0;
     a[0].ct_eq(&b[0]) & a[1].ct_eq(&b[1]) & a[2].ct_eq(&b[2]) & a[3].ct_eq(&b[3])
 }
 
@@ -1511,8 +1513,8 @@ impl Scalar {
 
 #[cfg(test)]
 mod tests {
-    use ark_ec::CurveConfig;
     use super::*;
+    use ark_ec::CurveConfig;
     // `to_bytes_be` / `num_bits` on the backend's `BigInt` come from this trait.
     use ark_ff::BigInteger;
 
@@ -1770,7 +1772,7 @@ mod tests {
     /// Test scalar multiplication matches the backend implementation with random scalars
     #[test]
     fn test_scalar_mult_consistency() {
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         const NUM_TESTS: usize = 1000;
         let seed: [u8; 32] = rand::random();
@@ -2974,5 +2976,93 @@ mod tests {
         };
 
         let _ = invalid.to_affine();
+    }
+
+    #[test]
+    fn test_randomization() {
+        use rand::{SeedableRng, rngs::StdRng};
+        let mut rng = StdRng::seed_from_u64(42);
+        // Cover ProjectivePoint::try_random (631-634)
+        let _ = ProjectivePoint::try_random(&mut rng).unwrap();
+
+        // Cover Scalar::random (1221-1223, 1500-1505)
+        let _ = <Scalar as Field>::random(&mut rng);
+
+        // Cover Scalar::try_random (1225-1227, 1507-1511)
+        let _ = <Scalar as Field>::try_random(&mut rng).unwrap();
+    }
+
+    #[test]
+    fn test_identity() {
+        // Cover ProjectivePoint::identity (640-642)
+        let identity = ProjectivePoint::identity();
+        assert!(bool::from(identity.is_identity()));
+    }
+
+    #[test]
+    fn test_field_ops() {
+        let s = Scalar::from(2u64);
+        // Cover Scalar::square (1229-1231)
+        let squared = s.square();
+        assert_eq!(squared, Scalar::from(4u64));
+
+        // Cover Scalar::double (1233-1235)
+        let doubled = s.double();
+        assert_eq!(doubled, Scalar::from(4u64));
+    }
+
+    #[test]
+    fn test_iterators() {
+        let points = [ProjectivePoint::GENERATOR, ProjectivePoint::GENERATOR];
+        // Cover Sum<&ProjectivePoint> for ProjectivePoint (1300-1302)
+        let sum: ProjectivePoint = points.iter().sum();
+        assert_eq!(sum, ProjectivePoint::GENERATOR + ProjectivePoint::GENERATOR);
+
+        let scalars = [Scalar::from(1u64), Scalar::from(2u64)];
+        // Cover Sum<&Scalar> for Scalar (1313-1315)
+        let sum_s: Scalar = scalars.iter().sum();
+        assert_eq!(sum_s, Scalar::from(3u64));
+
+        // Cover Product<&Scalar> for Scalar (1325-1327)
+        let prod_s: Scalar = scalars.iter().product();
+        assert_eq!(prod_s, Scalar::from(2u64));
+    }
+
+    #[test]
+    fn test_operator_overloads() {
+        let p = ProjectivePoint::GENERATOR;
+        let s = Scalar::from(2u64);
+
+        // Cover Add<&ProjectivePoint> for ProjectivePoint (849-854)
+        let _ = p + &p;
+
+        // Cover Sub<&ProjectivePoint> for &ProjectivePoint (883-888)
+        let _ = &p - &p;
+
+        // Cover Sub<&ProjectivePoint> for ProjectivePoint (894-899)
+        let _ = p - &p;
+
+        // Cover Mul<&Scalar> for &ProjectivePoint (954-958)
+        let _ = &p * &s;
+
+        let s1 = Scalar::from(1u64);
+        let s2 = Scalar::from(2u64);
+
+        // Cover Add<&Scalar> for Scalar (1350-1352)
+        let _ = s1 + &s2;
+
+        // Cover Sub<&Scalar> for &Scalar (1370-1372)
+        let _ = &s1 - &s2;
+
+        // Cover Mul<&Scalar> for &Scalar (1406-1408)
+        let _ = &s1 * &s2;
+    }
+
+    #[test]
+    fn test_affine_ct_eq() {
+        let a = AffinePoint::IDENTITY;
+        let b = AffinePoint::from(ProjectivePoint::GENERATOR);
+        // Cover AffinePoint::ct_eq (1478-1480)
+        let _ = a.ct_eq(&b);
     }
 }
