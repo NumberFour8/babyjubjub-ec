@@ -77,10 +77,7 @@ pub use taceo_ark_babyjubjub::Fr as BackendScalar;
 #[cfg(test)]
 use ark_ec::CurveConfig;
 use ark_ec::PrimeGroup;
-use ark_ff::{
-    fields::{AdditiveGroup, FftField, Field as ArkField, PrimeField as ArkPrimeField},
-    UniformRand,
-};
+use ark_ff::fields::{AdditiveGroup, FftField, Field as ArkField, PrimeField as ArkPrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use elliptic_curve::{Curve, PrimeCurve};
 use group::ff::{Field, PrimeField};
@@ -703,9 +700,14 @@ impl Scalar {
 impl Group for ProjectivePoint {
     type Scalar = Scalar;
 
-    fn random(rng: impl rand_core::RngCore) -> Self {
+    fn random<R: rand_core::Rng + ?Sized>(rng: &mut R) -> Self {
         let scalar = Scalar::random(rng);
         Self::generator() * scalar
+    }
+
+    fn try_random<R: rand_core::TryRng + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
+        let scalar = Scalar::try_random(rng)?;
+        Ok(Self::generator() * scalar)
     }
 
     fn generator() -> Self {
@@ -1296,8 +1298,12 @@ impl Field for Scalar {
         0x1f16424e1bb7724,
     ])));
 
-    fn random(mut rng: impl rand_core::RngCore) -> Self {
-        Scalar(BackendScalar::rand(&mut rng))
+    fn random<R: rand_core::Rng + ?Sized>(rng: &mut R) -> Self {
+        Scalar::random(rng)
+    }
+
+    fn try_random<R: rand_core::TryRng + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
+        Scalar::try_random(rng)
     }
 
     fn square(&self) -> Self {
@@ -1570,10 +1576,18 @@ impl ConstantTimeEq for ProjectivePoint {
     }
 }
 
-// Implement rand_core::RngCore for Scalar if needed
+// Inherent methods for random scalar generation
 impl Scalar {
-    pub fn random(mut rng: impl rand_core::RngCore) -> Self {
-        Scalar(BackendScalar::rand(&mut rng))
+    pub fn random<R: rand_core::Rng + ?Sized>(rng: &mut R) -> Self {
+        let mut bytes = [0u8; 40];
+        rng.fill_bytes(&mut bytes);
+        Self(BackendScalar::from_le_bytes_mod_order(&bytes))
+    }
+
+    pub fn try_random<R: rand_core::TryRng + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
+        let mut bytes = [0u8; 40];
+        rng.try_fill_bytes(&mut bytes)?;
+        Ok(Self(BackendScalar::from_le_bytes_mod_order(&bytes)))
     }
 }
 

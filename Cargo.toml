@@ -8,31 +8,31 @@ repository = "https://github.com/hoprnet/babyjubjub-ec"
 readme = "README.md"
 
 [dependencies]
-# Use ark-babyjubjub as the backend implementation
-# Note: taceo-ark-babyjubjub v0.5.3 depends on ark-ff 0.5.x, ark-ec 0.5.x, and ark-serialize 0.5.x
-# We keep ark-* dependencies at 0.5 to match the backend crate's requirements
-taceo-ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5.3" }
-# ark-ff for field traits (needed for BackendScalar operations)
-ark-ff = { version = "0.5", default-features = false }
-# elliptic-curve traits
-elliptic-curve = { version = "0.14.0", default-features = false }
-# group crate for core group traits
-group = { version = "0.13", default-features = false, features = ["rand"] }
-# Scalar field operations
-ff = { version = "0.14.0", default-features = false }
-# Subtle operations
-subtle = { version = "2.6", default-features = false }
-# Zeroize (optional - enables DefaultIsZeroes implementations)
-zeroize = { version = "1.9", default-features = false, optional = true }
-# Random number generation
-rand_core = { version = "0.6", default-features = false }
-# num-traits for Zero and One traits
-num-traits = { version = "0.2", default-features = false }
 # `default-features = false` so the dependency tree stays `no_std`-compatible
 # (the previous `ark-ec = "0.5"` pulled in `std` unconditionally, which broke
 # `--no-default-features` builds).
 ark-ec = { version = "0.5", default-features = false }
+# ark-ff for field traits (needed for BackendScalar operations)
+ark-ff = { version = "0.5", default-features = false }
 ark-serialize = { version = "0.5", default-features = false }
+# elliptic-curve traits
+elliptic-curve = { version = "0.14.0", default-features = false }
+# Scalar field operations
+ff = { version = "0.14", default-features = false }
+# group crate for core group traits
+group = { version = "0.14", default-features = false, features = ["rand"] }
+# num-traits for Zero and One traits
+num-traits = { version = "0.2", default-features = false }
+# Random number generation
+rand_core = { version = "0.10", default-features = false }
+# Subtle operations
+subtle = { version = "2.6", default-features = false }
+# Use ark-babyjubjub as the backend implementation
+# Note: taceo-ark-babyjubjub v0.5.3 depends on ark-ff 0.5.x, ark-ec 0.5.x, and ark-serialize 0.5.x
+# We keep ark-* dependencies at 0.5 to match the backend crate's requirements
+taceo-ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5.3" }
+# Zeroize (optional - enables DefaultIsZeroes implementations)
+zeroize = { version = "1.9", default-features = false, optional = true }
 
 [features]
 hazmat = []
@@ -47,11 +47,11 @@ std = [
 zeroize = ["dep:zeroize"]
 
 [dev-dependencies]
-# `std_rng` is required by tests that use `StdRng`; declare it explicitly rather
-# than relying on transitive feature unification from ark-std.
-rand = { version = "0.8" }
 criterion = { version = "0.8", default-features = false }
 hex = "0.4"
+# `std_rng` is required by tests that use `StdRng`; declare it explicitly rather
+# than relying on transitive feature unification from ark-std.
+rand = { version = "0.10" }
 
 [[bench]]
 name = "scalar_mult"
