@@ -2996,7 +2996,7 @@ mod tests {
     fn test_identity() {
         // Cover ProjectivePoint::identity (640-642)
         let identity = ProjectivePoint::identity();
-        assert!(bool::from(identity.is_identity()));
+        assert!(identity.is_identity());
     }
 
     #[test]
@@ -3032,6 +3032,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::op_ref)]
     fn test_operator_overloads() {
         let p = ProjectivePoint::GENERATOR;
         let s = Scalar::from(2u64);
