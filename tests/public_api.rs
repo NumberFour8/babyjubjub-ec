@@ -476,14 +476,14 @@ fn test_group_encoding_round_trip_identity() {
 
 #[test]
 fn test_group_encoding_round_trip_generator() {
-    let gen = ProjectivePoint::GENERATOR;
-    let bytes = gen.to_bytes();
+    let generator = ProjectivePoint::GENERATOR;
+    let bytes = generator.to_bytes();
 
     let decoded = ProjectivePoint::from_bytes(&bytes);
     assert!(bool::from(decoded.is_some()));
     let decoded_point = decoded.unwrap();
 
-    assert_eq!(decoded_point.to_affine(), gen.to_affine());
+    assert_eq!(decoded_point.to_affine(), generator.to_affine());
 }
 
 #[test]

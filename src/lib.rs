@@ -269,7 +269,7 @@ impl ProjectivePoint {
 
 
     /// Internal method to convert to a backend projective point without validation.
-    pub(crate) fn to_backend_unvalidated(&self) -> BackendProjective {
+    pub(crate) fn to_backend_unvalidated(self) -> BackendProjective {
         // The backend uses *extended* twisted Edwards coordinates (X : Y : T : Z)
         // with the invariant `T * Z == X * Y` (so that `T/Z == (X/Z)*(Y/Z)`).
         // Our `(x, y, z)` represents the affine point `(x/z, y/z)`. Naively setting
@@ -2537,8 +2537,8 @@ mod tests {
     fn test_group_encoding_round_trip_generator() {
         use group::GroupEncoding;
 
-        let gen = ProjectivePoint::GENERATOR;
-        let bytes = gen.to_bytes();
+        let generator = ProjectivePoint::GENERATOR;
+        let bytes = generator.to_bytes();
 
         // Decode and verify
         let decoded = ProjectivePoint::from_bytes(&bytes);
@@ -2546,7 +2546,7 @@ mod tests {
         let decoded_point = decoded.unwrap();
 
         // Convert both to affine for comparison
-        let gen_affine = gen.to_affine();
+        let gen_affine = generator.to_affine();
         let decoded_affine = decoded_point.to_affine();
 
         assert_eq!(decoded_affine.x, gen_affine.x);
@@ -2558,8 +2558,8 @@ mod tests {
     fn test_group_encoding_from_bytes_unchecked() {
         use group::GroupEncoding;
 
-        let gen = ProjectivePoint::GENERATOR;
-        let bytes = gen.to_bytes();
+        let generator = ProjectivePoint::GENERATOR;
+        let bytes = generator.to_bytes();
         let result = ProjectivePoint::from_bytes_unchecked(&bytes);
         // Should decode successfully
         assert_eq!(result.is_none().unwrap_u8(), 0);
@@ -2602,8 +2602,8 @@ mod tests {
         use group::GroupEncoding;
 
         // Test with the generator itself - this exercises the sign bit handling
-        let gen = ProjectivePoint::GENERATOR;
-        let bytes = gen.to_bytes();
+        let generator = ProjectivePoint::GENERATOR;
+        let bytes = generator.to_bytes();
 
         // Verify from_bytes can decode the generator
         let decoded = ProjectivePoint::from_bytes(&bytes);
@@ -2615,9 +2615,9 @@ mod tests {
 
         // Verify coordinates match when converted to affine
         let decoded_affine = decoded.unwrap().to_affine();
-        let gen_affine = gen.to_affine();
-        assert_eq!(decoded_affine.x, gen_affine.x);
-        assert_eq!(decoded_affine.y, gen_affine.y);
+        let generator_affine = generator.to_affine();
+        assert_eq!(decoded_affine.x, generator_affine.x);
+        assert_eq!(decoded_affine.y, generator_affine.y);
     }
 
     /// Decoding must never panic for arbitrary 32-byte input.
