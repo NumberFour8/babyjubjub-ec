@@ -1,6 +1,6 @@
 [package]
 name = "babyjubjub-ec"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "GPL-3.0"
 description = "BabyJubJub elliptic curve implementation wrapped in elliptic-curve traits"
@@ -30,7 +30,7 @@ subtle = { version = "2.6", default-features = false }
 # Use ark-babyjubjub as the backend implementation
 # Note: taceo-ark-babyjubjub v0.5.3 depends on ark-ff 0.5.x, ark-ec 0.5.x, and ark-serialize 0.5.x
 # We keep ark-* dependencies at 0.5 to match the backend crate's requirements
-taceo-ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5.3" }
+taceo-ark-babyjubjub = { version = "0.5.3" }
 # Zeroize (optional - enables DefaultIsZeroes implementations)
 zeroize = { version = "1.9", default-features = false, optional = true }
 

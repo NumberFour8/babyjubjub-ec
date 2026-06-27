@@ -37,7 +37,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-babyjubjub-ec = "0.2"
+babyjubjub-ec = "0.3"
 ```
 
 ## Usage
