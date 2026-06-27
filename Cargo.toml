@@ -15,15 +15,15 @@ taceo-ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5.3" }
 # ark-ff for field traits (needed for BackendScalar operations)
 ark-ff = { version = "0.5", default-features = false }
 # elliptic-curve traits
-elliptic-curve = { version = "0.14.0-rc.36", default-features = false }
+elliptic-curve = { version = "0.14.0", default-features = false }
 # group crate for core group traits
 group = { version = "0.13", default-features = false, features = ["rand"] }
 # Scalar field operations
-ff = { version = "0.13", default-features = false }
+ff = { version = "0.14.0", default-features = false }
 # Subtle operations
 subtle = { version = "2.6", default-features = false }
 # Zeroize (optional - enables DefaultIsZeroes implementations)
-zeroize = { version = "1.8", default-features = false, optional = true }
+zeroize = { version = "1.9", default-features = false, optional = true }
 # Random number generation
 rand_core = { version = "0.6", default-features = false }
 # num-traits for Zero and One traits

@@ -164,14 +164,20 @@ This crate is a thin wrapper over the arkworks backend. Please note:
 
 - **Scalar multiplication is *almost* constant-time.** Both the `*` operator and
   `ProjectivePoint::mul_fixed_schedule` run a constant-time scalar-multiplication
-  *algorithm*: the backend (`taceo-ark-babyjubjub`) implements the curve's
-  `mul_projective` as a Montgomery ladder over a fixed number of scalar bits (no
-  leading-zero skipping) with branch-free, bit-masked register swaps, so there is
-  no scalar-dependent loop length, branching, or memory-access pattern. They are
-  **not** end-to-end constant-time, however: the underlying `ark-ff` field
-  arithmetic uses a data-dependent conditional reduction (`Fp::subtract_modulus`),
-  leaving a small residual timing signal. For end-to-end constant time, use a
-  backend with bit-masked field reduction throughout.
+  *algorithm* (no scalar-dependent loop length, branching, or memory-access
+  pattern), but through two distinct code paths. The `*` operator delegates to the
+  backend's `mul_projective`, which `taceo-ark-babyjubjub` implements as a
+  **Montgomery ladder** over a fixed number of scalar bits (no leading-zero
+  skipping) with branch-free, bit-masked register swaps.
+  `ProjectivePoint::mul_fixed_schedule`, by contrast, does **not** use the
+  backend's `mul_projective`: it runs an in-crate **double-and-add-always** loop
+  built only on the curve's complete point addition and doubling, so its
+  algorithm-level constant-time property does not depend on the backend's
+  scalar-multiplication routine. Neither is **end-to-end** constant-time, however:
+  the underlying `ark-ff` field arithmetic uses a data-dependent conditional
+  reduction (`Fp::subtract_modulus`), leaving a small residual timing signal. For
+  end-to-end constant time, use a backend with bit-masked field reduction
+  throughout.
 - **Variable-time scalar-field operations.** `Scalar::invert` and `Scalar`'s
   `sqrt`/`sqrt_ratio` delegate to the backend and are **not** constant-time
   (input-dependent control flow).

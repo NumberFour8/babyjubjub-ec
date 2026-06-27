@@ -12,15 +12,23 @@
 //!   backend, so the relevant timing guarantees are the backend's.
 //!     - **Scalar multiplication is *almost* constant-time.** The `Mul<Scalar>`
 //!       operators on [`ProjectivePoint`] and
-//!       [`ProjectivePoint::mul_fixed_schedule`] run a scalar-multiplication
-//!       *algorithm* with no scalar-dependent control flow: the backend
-//!       (`taceo-ark-babyjubjub`) overrides the curve's `mul_projective` with a
+//!       [`ProjectivePoint::mul_fixed_schedule`] both run a scalar-multiplication
+//!       *algorithm* with no scalar-dependent control flow, but via two distinct
+//!       code paths. The `Mul<Scalar>` operators delegate to the backend's
+//!       `mul_projective`, which `taceo-ark-babyjubjub` overrides with a
 //!       **Montgomery ladder** that iterates over a fixed number of scalar bits
 //!       (it does *not* skip leading zeros) and swaps the two ladder registers
-//!       using branch-free, bit-masked conditional swaps, so the loop length,
-//!       branching, and memory-access pattern are all independent of the scalar.
-//!       It is **not** end-to-end constant-time, however: the underlying `ark-ff`
-//!       field arithmetic uses a data-dependent conditional reduction
+//!       using branch-free, bit-masked conditional swaps.
+//!       [`ProjectivePoint::mul_fixed_schedule`], by contrast, does **not** call
+//!       the backend's `mul_projective`: it runs an in-crate
+//!       **double-and-add-always** loop over a fixed number of scalar bits, built
+//!       only on the curve's complete (exception-free) point addition and
+//!       doubling plus a bit-masked `subtle` select, so its algorithm-level
+//!       constant-time property does **not** rely on the backend's
+//!       scalar-multiplication routine. Either way the loop length, branching,
+//!       and memory-access pattern are independent of the scalar. Neither is
+//!       **end-to-end** constant-time, however: the underlying `ark-ff` field
+//!       arithmetic uses a data-dependent conditional reduction
 //!       (`Fp::subtract_modulus` via `is_geq_modulus`, a BigInteger comparison)
 //!       whose timing depends on the intermediate field values, leaving a small
 //!       residual timing signal. For end-to-end constant time, use a backend with
@@ -386,7 +394,7 @@ impl ProjectivePoint {
     pub fn is_identity(&self) -> bool {
         // Best-effort constant-time check using bitwise limb operations.
         // The `z != 0` guard uses short-circuit (not a secret — it determines
-        // representation format, not a key-dependent value).
+        // a representation format, not a key-dependent value).
         let z_nonzero = !self.z.is_zero();
         let limbs_x = &self.x.0 .0;
         let limbs_z = &self.z.0 .0;
@@ -472,20 +480,6 @@ impl ProjectivePoint {
             acc = Self::conditional_select(&doubled, &sum, subtle::Choice::from(bit));
         }
         acc
-    }
-
-    /// Alias for [`ProjectivePoint::mul_fixed_schedule`].
-    ///
-    /// The `ct` suffix is historical and should not be interpreted as a
-    /// constant-time guarantee — the underlying field arithmetic is not CT.
-    /// Prefer [`ProjectivePoint::mul_fixed_schedule`] in new code.
-    ///
-    /// # Panics
-    ///
-    /// Panics unless `self` is in the prime-order subgroup, exactly as
-    /// [`ProjectivePoint::mul_fixed_schedule`].
-    pub fn mul_ct(&self, scalar: &Scalar) -> Self {
-        self.mul_fixed_schedule(scalar)
     }
 
     /// Scalar multiplication that additionally clears the cofactor, producing a

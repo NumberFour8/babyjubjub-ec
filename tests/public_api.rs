@@ -775,24 +775,6 @@ fn test_group_random_is_in_prime_order_subgroup() {
     assert!(seen_distinct, "random must produce distinct points");
 }
 
-// ==================== mul_ct Alias Test ====================
-
-#[test]
-fn test_mul_ct_matches_mul_fixed_schedule() {
-    let g = ProjectivePoint::GENERATOR;
-    for s in [
-        Scalar::ZERO,
-        Scalar::ONE,
-        Scalar::from(42u64),
-        Scalar::ZERO - Scalar::ONE,
-    ] {
-        assert_eq!(
-            g.mul_ct(&s).to_affine(),
-            g.mul_fixed_schedule(&s).to_affine()
-        );
-    }
-}
-
 // ==================== PrimeField Repr Round-Trip Tests ====================
 
 #[test]
