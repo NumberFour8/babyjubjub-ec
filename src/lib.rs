@@ -26,18 +26,38 @@
 //!       doubling plus a bit-masked `subtle` select, so its algorithm-level
 //!       constant-time property does **not** rely on the backend's
 //!       scalar-multiplication routine. Either way the loop length, branching,
-//!       and memory-access pattern are independent of the scalar. Neither is
-//!       **end-to-end** constant-time, however: the underlying `ark-ff` field
-//!       arithmetic uses a data-dependent conditional reduction
+//!       and memory-access pattern are independent of the scalar. By default,
+//!       though, neither is **end-to-end** constant-time: the underlying
+//!       `ark-ff` field arithmetic uses a data-dependent conditional reduction
 //!       (`Fp::subtract_modulus` via `is_geq_modulus`, a BigInteger comparison)
 //!       whose timing depends on the intermediate field values, leaving a small
-//!       residual timing signal. For end-to-end constant time, use a backend with
-//!       bit-masked field reduction throughout (e.g. `fiat-crypto`-generated
-//!       code).
-//!     - **Variable-time scalar-field operations.** [`Scalar::invert`] and
-//!       [`Scalar`]'s `sqrt`/`sqrt_ratio` have input-dependent control flow and
-//!       can leak their inputs through timing.
+//!       residual timing signal. **Enable the `fiat` feature** (see below) to
+//!       remove this: it switches the field layer to vendored, formally-verified
+//!       `fiat-crypto` code with branch-free, bit-masked reduction, making curve
+//!       `add` / `double` / `mul` / `mul_fixed_schedule` /
+//!       `mul_with_cofactor_clear` constant-time end-to-end.
+//!     - **Scalar-field inversion / square root.** With the default backend,
+//!       [`Scalar::invert`] and [`Scalar`]'s `sqrt`/`sqrt_ratio` have
+//!       input-dependent control flow and can leak their inputs through timing.
+//!       The `fiat` feature makes [`Scalar::invert`] (and `Field::invert`, and
+//!       the `z`-coordinate inversion inside [`ProjectivePoint::to_affine`])
+//!       constant-time via a Bernstein-Yang `divstep` chain. `sqrt`/`sqrt_ratio`
+//!       remain variable-time on **both** backends (Tonelli–Shanks is inherently
+//!       data-dependent); they are not used on secrets in this crate, but you
+//!       must not call them on secret values where timing is observable.
 //!     - `ConditionallySelectable` and `ct_eq` are constant-time.
+//!     - **`fiat` feature (opt-in, off by default).** Selects a constant-time
+//!       field backend: the field/scalar arithmetic underlying every curve
+//!       operation runs over vendored, formally-verified `fiat-crypto` code
+//!       (branch-free masked reduction plus Bernstein-Yang inversion) instead of
+//!       `ark-ff`'s data-dependent reduction, mitigating both the residual
+//!       field-level timing leak and the variable-time inversions above. It
+//!       describes the **same** curve with byte-identical encodings, validation
+//!       and results, so observable behavior is unchanged; the trade-off is
+//!       performance — portable constant-time code is measurably slower than
+//!       `ark-ff`'s assembly (on the order of ~1.5x for a scalar multiplication).
+//!       `sqrt`/`sqrt_ratio` stay variable-time, and statistical timing
+//!       verification (e.g. `dudect`) is a recommended follow-up.
 //! - **Validation.** Points decoded via [`GroupEncoding::from_bytes`] are
 //!   checked to be on-curve **and** in the prime-order subgroup. The
 //!   [`GroupEncoding::from_bytes_unchecked`] decoder performs **no** such checks; prefer
@@ -65,12 +85,19 @@
 )]
 #![forbid(unsafe_code)]
 
+// Curve/field backend selection. The `backend` module re-exports the four
+// backend aliases (`Backend{BaseField,Scalar,Affine,Projective}`) and the curve
+// generator coordinates (`GENERATOR_X`, `GENERATOR_Y`) from either the default
+// fast `taceo-ark-babyjubjub` backend or, with `--features fiat`, a constant-time
+// backend built on vendored fiat-crypto arithmetic. The rest of this file is
+// generic over those aliases and is identical for both backends; with the
+// feature off, the selected backend is exactly the previous one, so the public
+// API and behavior are unchanged.
+mod backend;
+
 // ===== Re-export backend types =====
 
-pub use taceo_ark_babyjubjub::EdwardsAffine as BackendAffine;
-pub use taceo_ark_babyjubjub::EdwardsProjective as BackendProjective;
-pub use taceo_ark_babyjubjub::Fq as BackendBaseField;
-pub use taceo_ark_babyjubjub::Fr as BackendScalar;
+pub use backend::{BackendAffine, BackendBaseField, BackendProjective, BackendScalar};
 
 // ===== Import required traits for BackendScalar operations =====
 use ark_ec::PrimeGroup;
@@ -141,8 +168,8 @@ impl AffinePoint {
 
     /// Generator point from backend (via GENERATOR_X and GENERATOR_Y constants)
     pub const GENERATOR: Self = Self {
-        x: taceo_ark_babyjubjub::GENERATOR_X,
-        y: taceo_ark_babyjubjub::GENERATOR_Y,
+        x: backend::GENERATOR_X,
+        y: backend::GENERATOR_Y,
     };
 
     // Create a new affine point from raw coordinates **without any validation**.
@@ -250,8 +277,8 @@ impl ProjectivePoint {
     /// Generator point from backend (converted to projective coordinates)
     pub const GENERATOR: Self = {
         Self {
-            x: taceo_ark_babyjubjub::GENERATOR_X,
-            y: taceo_ark_babyjubjub::GENERATOR_Y,
+            x: backend::GENERATOR_X,
+            y: backend::GENERATOR_Y,
             z: BackendBaseField::ONE,
         }
     };
@@ -688,13 +715,13 @@ impl ConditionallySelectable for ProjectivePoint {
         let z_limb3 = u64::conditional_select(&a.z.0.0[3], &b.z.0.0[3], choice);
 
         Self {
-            x: BackendBaseField::new_unchecked(ark_ff::BigInt([
+            x: backend::new_base_field_unchecked(ark_ff::BigInt([
                 x_limb0, x_limb1, x_limb2, x_limb3,
             ])),
-            y: BackendBaseField::new_unchecked(ark_ff::BigInt([
+            y: backend::new_base_field_unchecked(ark_ff::BigInt([
                 y_limb0, y_limb1, y_limb2, y_limb3,
             ])),
-            z: BackendBaseField::new_unchecked(ark_ff::BigInt([
+            z: backend::new_base_field_unchecked(ark_ff::BigInt([
                 z_limb0, z_limb1, z_limb2, z_limb3,
             ])),
         }
@@ -1101,10 +1128,10 @@ impl ConditionallySelectable for AffinePoint {
         let y_limb3 = u64::conditional_select(&a.y.0.0[3], &b.y.0.0[3], choice);
 
         Self {
-            x: BackendBaseField::new_unchecked(ark_ff::BigInt([
+            x: backend::new_base_field_unchecked(ark_ff::BigInt([
                 x_limb0, x_limb1, x_limb2, x_limb3,
             ])),
-            y: BackendBaseField::new_unchecked(ark_ff::BigInt([
+            y: backend::new_base_field_unchecked(ark_ff::BigInt([
                 y_limb0, y_limb1, y_limb2, y_limb3,
             ])),
         }
@@ -1150,7 +1177,7 @@ impl PrimeField for Scalar {
         "060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f1";
 
     // Pre-computed values for BabyJubJub scalar field (Montgomery representation)
-    const TWO_INV: Self = Self(BackendScalar::new_unchecked(ark_ff::BigInt([
+    const TWO_INV: Self = Self(backend::new_scalar_unchecked(ark_ff::BigInt([
         0x83998aef5047ce3b,
         0xf3d67fe3504c7925,
         0x7c2d4900ec0c780a,
@@ -1175,7 +1202,7 @@ impl PrimeField for Scalar {
 
     // Inverse of ROOT_OF_UNITY (Montgomery form). Verified by tests:
     // ROOT_OF_UNITY * ROOT_OF_UNITY_INV == ONE.
-    const ROOT_OF_UNITY_INV: Self = Self(BackendScalar::new_unchecked(ark_ff::BigInt([
+    const ROOT_OF_UNITY_INV: Self = Self(backend::new_scalar_unchecked(ark_ff::BigInt([
         0x3cd891231ce44036,
         0x97c6d3222a9aac61,
         0x22a59f417e5ba9ca,
@@ -1184,7 +1211,7 @@ impl PrimeField for Scalar {
 
     // DELTA = MULTIPLICATIVE_GENERATOR^(2^S) (Montgomery form), per the `ff`
     // contract. Verified by tests: DELTA == MULTIPLICATIVE_GENERATOR^(2^S).
-    const DELTA: Self = Self(BackendScalar::new_unchecked(ark_ff::BigInt([
+    const DELTA: Self = Self(backend::new_scalar_unchecked(ark_ff::BigInt([
         0xffb1712417f98edb,
         0x3c08c1257227dc15,
         0x370087e6983b16f7,
@@ -1200,7 +1227,7 @@ impl ConditionallySelectable for Scalar {
         let limb2 = u64::conditional_select(&a.0.0.0[2], &b.0.0.0[2], choice);
         let limb3 = u64::conditional_select(&a.0.0.0[3], &b.0.0.0[3], choice);
 
-        Self(BackendScalar::new_unchecked(ark_ff::BigInt([
+        Self(backend::new_scalar_unchecked(ark_ff::BigInt([
             limb0, limb1, limb2, limb3,
         ])))
     }
@@ -1210,8 +1237,8 @@ impl ConditionallySelectable for Scalar {
 impl DefaultIsZeroes for Scalar {}
 
 impl Field for Scalar {
-    const ZERO: Self = Self(BackendScalar::new_unchecked(ark_ff::BigInt([0; 4])));
-    const ONE: Self = Self(BackendScalar::new_unchecked(ark_ff::BigInt([
+    const ZERO: Self = Self(backend::new_scalar_unchecked(ark_ff::BigInt([0; 4])));
+    const ONE: Self = Self(backend::new_scalar_unchecked(ark_ff::BigInt([
         0x73315dea08f9c76,
         0xe7acffc6a098f24b,
         0xf85a9201d818f015,
