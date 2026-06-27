@@ -162,15 +162,28 @@ cargo bench
 
 This crate is a thin wrapper over the arkworks backend. Please note:
 
-- **Variable-time arithmetic.** Scalar multiplication via the `*` operator,
-  `Scalar::invert`, and `Scalar`'s `sqrt`/`sqrt_ratio` delegate to the backend
-  and are **not** constant-time. `ProjectivePoint::mul_fixed_schedule` avoids
-  scalar-dependent control flow in this wrapper, but still calls backend group
-  operations and must not be treated as an end-to-end constant-time primitive.
+- **Scalar multiplication is *almost* constant-time.** Both the `*` operator and
+  `ProjectivePoint::mul_fixed_schedule` run a constant-time scalar-multiplication
+  *algorithm* (no scalar-dependent loop length, branching, or memory-access
+  pattern), but through two distinct code paths. The `*` operator delegates to the
+  backend's `mul_projective`, which `taceo-ark-babyjubjub` implements as a
+  **Montgomery ladder** over a fixed number of scalar bits (no leading-zero
+  skipping) with branch-free, bit-masked register swaps.
+  `ProjectivePoint::mul_fixed_schedule`, by contrast, does **not** use the
+  backend's `mul_projective`: it runs an in-crate **double-and-add-always** loop
+  built only on the curve's complete point addition and doubling, so its
+  algorithm-level constant-time property does not depend on the backend's
+  scalar-multiplication routine. Neither is **end-to-end** constant-time, however:
+  the underlying `ark-ff` field arithmetic uses a data-dependent conditional
+  reduction (`Fp::subtract_modulus`), leaving a small residual timing signal. For
+  end-to-end constant time, use a backend with bit-masked field reduction
+  throughout.
+- **Variable-time scalar-field operations.** `Scalar::invert` and `Scalar`'s
+  `sqrt`/`sqrt_ratio` delegate to the backend and are **not** constant-time
+  (input-dependent control flow).
 - **Validation.** `ProjectivePoint::from_bytes` validates on-curve and
-  prime-order-subgroup membership. The raw constructors `AffinePoint::new_unchecked` /
-  `ProjectivePoint::new_unchecked` and `from_bytes_unchecked` do **not**; for untrusted
-  coordinates use `AffinePoint::new` or the `is_on_curve` /
+  prime-order-subgroup membership. The `from_bytes_unchecked` decoder does **not**;
+  for untrusted coordinates use `AffinePoint::new` or the `is_on_curve` /
   `is_in_prime_order_subgroup` helpers.
 - **Canonical encodings.** Scalar decoding (`from_bytes`, `from_repr`) rejects
   non-canonical values `>= r`, and the point encoding is a canonical 32 bytes,
