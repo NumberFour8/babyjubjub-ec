@@ -72,6 +72,10 @@ pub use taceo_ark_babyjubjub::EdwardsProjective as BackendProjective;
 pub use taceo_ark_babyjubjub::Fq as BackendBaseField;
 pub use taceo_ark_babyjubjub::Fr as BackendScalar;
 
+pub use elliptic_curve;
+pub use group;
+pub use subtle;
+
 // ===== Import required traits for BackendScalar operations =====
 use ark_ec::PrimeGroup;
 use ark_ff::fields::{AdditiveGroup, FftField, Field as ArkField, PrimeField as ArkPrimeField};

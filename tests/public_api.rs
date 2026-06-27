@@ -2,12 +2,12 @@
 //!
 //! These tests exercise only the public API and can be run as integration tests.
 
+use babyjubjub_ec::group::ff::{Field, PrimeField};
+use babyjubjub_ec::group::{Group, GroupEncoding};
+use babyjubjub_ec::subtle::{ConditionallySelectable, ConstantTimeEq};
 use babyjubjub_ec::{
     AffinePoint, BabyJubJub, BackendBaseField, GroupRepr, ProjectivePoint, Scalar,
 };
-use group::ff::{Field, PrimeField};
-use group::{Group, GroupEncoding};
-use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 // ==================== Identity Tests ====================
 
