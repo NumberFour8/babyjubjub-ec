@@ -182,9 +182,8 @@ This crate is a thin wrapper over the arkworks backend. Please note:
   `sqrt`/`sqrt_ratio` delegate to the backend and are **not** constant-time
   (input-dependent control flow).
 - **Validation.** `ProjectivePoint::from_bytes` validates on-curve and
-  prime-order-subgroup membership. The raw constructors `AffinePoint::new_unchecked` /
-  `ProjectivePoint::new_unchecked` and `from_bytes_unchecked` do **not**; for untrusted
-  coordinates use `AffinePoint::new` or the `is_on_curve` /
+  prime-order-subgroup membership. The `from_bytes_unchecked` decoder does **not**;
+  for untrusted coordinates use `AffinePoint::new` or the `is_on_curve` /
   `is_in_prime_order_subgroup` helpers.
 - **Canonical encodings.** Scalar decoding (`from_bytes`, `from_repr`) rejects
   non-canonical values `>= r`, and the point encoding is a canonical 32 bytes,

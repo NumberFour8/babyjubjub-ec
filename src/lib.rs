@@ -106,9 +106,8 @@ const SCALAR_MODULUS_LE: [u8; 32] = [
 
 /// BabyJubJub cofactor (the number of curve points per prime-order subgroup element).
 ///
-/// This value is checked by the test suite against the backend's
-/// `<BackendProjective as ark_ec::CurveGroup>::Config::COFACTOR`; a backend change
-/// that altered the cofactor would fail tests.
+/// This value is checked by the test suite to match the underlying curve's
+/// cofactor; a backend change that altered the cofactor would fail tests.
 pub const COFACTOR: u64 = 8;
 
 impl Curve for BabyJubJub {
@@ -203,7 +202,7 @@ impl AffinePoint {
     /// Parity (least-significant bit) of the **canonical** x-coordinate.
     ///
     /// This is the RFC 8032 / EdDSA sign convention (LSB of `x`), which is
-    /// **not** the same convention used by the backend's compressed point
+    /// **not** the same convention used by the underlying curve's compressed point
     /// encoding (ark packs a `x > -x` "is-negative" flag into the spare high
     /// bits of `y`). Do not use this value to hand-roll point compression that
     /// must interoperate with [`ProjectivePoint::to_bytes`]; it is provided only
@@ -366,8 +365,8 @@ impl ProjectivePoint {
     /// # Panics
     ///
     /// Panics unless `self` is in the prime-order subgroup. Each iteration adds
-    /// via the `+` operator, which converts through
-    /// `From<ProjectivePoint> for BackendProjective` and asserts subgroup
+    /// via the `+` operator, which converts to the underlying curve
+    /// implementation's representation and asserts subgroup
     /// membership. For points that may be on-curve but outside the prime-order
     /// subgroup (e.g. torsion points) use [`ProjectivePoint::mul_with_cofactor_clear`]
     /// instead. The same subgroup assertion applies to the `*` operator and
@@ -378,7 +377,7 @@ impl ProjectivePoint {
     /// This is **not** an end-to-end constant-time scalar multiplication.
     /// The fixed loop length and bit-mask conditional select are constant-time
     /// at the algorithm level, but each iteration calls
-    /// the arkworks backend's point addition and doubling, which in turn call
+    /// the underlying curve implementation's point addition and doubling, which in turn call
     /// `ark-ff` field arithmetic. That field arithmetic uses a data-dependent
     /// conditional reduction (`Fp::subtract_modulus` via `is_geq_modulus`, a
     /// regular BigInteger comparison that compiles to u64-level conditional
@@ -587,7 +586,7 @@ impl Scalar {
     ///
     /// # Security Note
     ///
-    /// This method uses the backend's `inverse()` function which implements
+    /// This method uses the underlying field implementation's inverse function which implements
     /// a variable-time extended Euclidean algorithm. This means:
     /// - The timing may leak information about whether the input is zero
     /// - The method returns `CtOption::new(Self::ZERO, 0.into())` when input is zero
@@ -1035,11 +1034,10 @@ impl From<ProjectivePoint> for BackendProjective {
     /// # Panics
     ///
     /// Panics if `point` is on the curve but **not** in the prime-order subgroup
-    /// (the backend `BackendProjective::new` asserts subgroup membership). This is
+    /// (the underlying curve implementation's constructor asserts subgroup membership). This is
     /// the assertion that makes the arithmetic operators (`+`, `-`, `*`,
     /// [`Group::double`], [`ProjectivePoint::mul_fixed_schedule`]) panic on
-    /// torsion/small-subgroup inputs. Use `ProjectivePoint::to_backend_unvalidated`
-    /// (and the internal `*_unchecked` helpers) to operate on such points without panicking.
+    /// torsion/small-subgroup inputs.
     fn from(point: ProjectivePoint) -> Self {
         // Identity shortcut: BackendProjective::new asserts the subgroup for all
         // non-identity points, so calling it for the identity would panic.
