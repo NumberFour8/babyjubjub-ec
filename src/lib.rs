@@ -3000,15 +3000,18 @@ mod tests {
     }
 
     #[test]
-    fn test_field_ops() {
+    fn test_scalar_field_square_double() {
         let s = Scalar::from(2u64);
-        // Cover Scalar::square (1229-1231)
-        let squared = s.square();
+        // Explicitly test Field trait methods (lines 1229-1235) to ensure coverage
+        let squared = <Scalar as Field>::square(&s);
         assert_eq!(squared, Scalar::from(4u64));
 
-        // Cover Scalar::double (1233-1235)
-        let doubled = s.double();
+        let doubled = <Scalar as Field>::double(&s);
         assert_eq!(doubled, Scalar::from(4u64));
+
+        let zero = Scalar::ZERO;
+        assert_eq!(<Scalar as Field>::square(&zero), zero);
+        assert_eq!(<Scalar as Field>::double(&zero), zero);
     }
 
     #[test]
