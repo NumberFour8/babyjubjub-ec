@@ -1,6 +1,6 @@
 [package]
 name = "babyjubjub-ec"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "GPL-3.0"
 description = "BabyJubJub elliptic curve implementation wrapped in elliptic-curve traits"
@@ -44,6 +44,14 @@ std = [
     "ark-serialize/std",
 ]
 zeroize = ["dep:zeroize"]
+# Opt-in constant-time field backend selection. When enabled, the curve/field/
+# scalar layers run over vendored, formally-verified fiat-crypto arithmetic with
+# branch-free masked reduction and Bernstein-Yang inversion (mitigates the
+# residual field-level timing leak; see the crate-level `# Security` docs).
+# Default off: the fast arkworks path remains the default. Pure safe Rust,
+# `no_std`-compatible, and adds no runtime dependency (the code is vendored under
+# `src/backend/fiat/`).
+fiat = []
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false }
