@@ -35,7 +35,6 @@ taceo-ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5.3" }
 zeroize = { version = "1.9", default-features = false, optional = true }
 
 [features]
-hazmat = []
 default = ["std"]
 std = [
     "elliptic-curve/std",

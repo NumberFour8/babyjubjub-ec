@@ -39,9 +39,8 @@
 //!       can leak their inputs through timing.
 //!     - `ConditionallySelectable` and `ct_eq` are constant-time.
 //! - **Validation.** Points decoded via [`GroupEncoding::from_bytes`] are
-//!   checked to be on-curve **and** in the prime-order subgroup. The raw
-//!   constructors `AffinePoint::new_unchecked` / `ProjectivePoint::new_unchecked` and
-//!   [`GroupEncoding::from_bytes_unchecked`] perform **no** such checks; prefer
+//!   checked to be on-curve **and** in the prime-order subgroup. The
+//!   [`GroupEncoding::from_bytes_unchecked`] decoder performs **no** such checks; prefer
 //!   [`AffinePoint::new`] or the validation helpers
 //!   ([`AffinePoint::is_on_curve`], [`AffinePoint::is_in_prime_order_subgroup`])
 //!   for untrusted input.
@@ -149,19 +148,11 @@ impl AffinePoint {
         y: taceo_ark_babyjubjub::GENERATOR_Y,
     };
 
-    /// Create a new affine point from raw coordinates **without any validation**.
-    ///
-    /// # Security
-    ///
-    /// This performs **no** on-curve or prime-order-subgroup checks. Feeding
-    /// attacker-controlled coordinates into curve arithmetic can lead to
-    /// invalid-curve and small-subgroup attacks. For untrusted input prefer
-    /// [`AffinePoint::new`] (validates on-curve **and** subgroup
-    /// membership) or decode via [`ProjectivePoint::from_bytes`]. Use
-    /// [`AffinePoint::is_on_curve`] / [`AffinePoint::is_in_prime_order_subgroup`]
-    /// to validate a point obtained from this constructor.
-    #[cfg(feature = "hazmat")]
-    pub fn new_unchecked(x: BackendBaseField, y: BackendBaseField) -> Self {
+    // Create a new affine point from raw coordinates **without any validation**.
+    //
+    // This is for internal/test use only.
+    #[allow(dead_code)]
+    pub(crate) fn new_unchecked(x: BackendBaseField, y: BackendBaseField) -> Self {
         Self { x, y }
     }
 
@@ -268,71 +259,15 @@ impl ProjectivePoint {
         }
     };
 
-    /// Create a new projective point from coordinates **without any validation**.
-    ///
-    /// # Security
-    ///
-    /// This performs **no** on-curve or prime-order-subgroup checks. Feeding
-    /// attacker-controlled coordinates into curve arithmetic can lead to
-    /// invalid-curve and small-subgroup attacks. For untrusted input prefer
-    /// [`ProjectivePoint::from_bytes`] which validates on-curve and subgroup
-    /// membership. Use [`ProjectivePoint::is_on_curve`] /
-    /// [`ProjectivePoint::is_in_prime_order_subgroup`] to validate a point
-    /// obtained from this constructor.
-    #[cfg(feature = "hazmat")]
-    pub fn new_unchecked(x: BackendBaseField, y: BackendBaseField, z: BackendBaseField) -> Self {
+    // Create a new projective point from coordinates **without any validation**.
+    //
+    // This is for internal/test use only.
+    #[allow(dead_code)]
+    pub(crate) fn new_unchecked(x: BackendBaseField, y: BackendBaseField, z: BackendBaseField) -> Self {
         Self { x, y, z }
     }
 
-    /// Construct from raw field components without any validation.
-    ///
-    /// # Security
-    ///
-    /// This method performs **no** on-curve or subgroup checks. Its primary
-    /// use case is constructing known torsion points for testing or for
-    /// performance-critical internal paths where caller guarantees are
-    /// already established. **Never use this with untrusted input.**
-    ///
-    /// Unlike [`new_unchecked`](Self::new_unchecked), this method exists
-    /// because the arithmetic operators (`+`, `*`, etc.) are implemented via
-    /// `From<&ProjectivePoint> for BackendProjective`, which calls
-    /// `BackendProjective::new` and would **panic** on non-subgroup points.
-    /// This method allows constructing a `ProjectivePoint` that can safely be
-    /// used with those operators without triggering the subgroup assertion.
-    ///
-    /// # Example
-    ///
-    /// Construct the order-2 torsion element `(0 : -1 : 1)`:
-    /// ```
-    /// # use babyjubjub_ec::{ProjectivePoint, BackendBaseField};
-    /// # use ark_ff::{fields::AdditiveGroup, Field};
-    /// let p2 = ProjectivePoint::from_raw_parts(
-    ///     BackendBaseField::ZERO,
-    ///     -BackendBaseField::ONE,
-    ///     BackendBaseField::ONE,
-    /// );
-    /// ```
-    #[cfg(feature = "hazmat")]
-    pub fn from_raw_parts(x: BackendBaseField, y: BackendBaseField, z: BackendBaseField) -> Self {
-        Self { x, y, z }
-    }
 
-    /// Convert to a backend projective point for use with backend arithmetic,
-    /// bypassing the prime-order-subgroup assertion.
-    ///
-    /// **This is a lower-level escape hatch.** The standard `Into<BackendProjective>`
-    /// conversion panics on non-subgroup points (the backend `new` constructor
-    /// asserts `is_in_correct_subgroup_assuming_on_curve`). This method constructs
-    /// the backend point from raw coordinates directly, without that assertion,
-    /// enabling arithmetic on torsion/small-subgroup points.
-    ///
-    /// Use this only when you need to operate on points that are known to be
-    /// on-curve but not in the prime-order subgroup, and only in controlled
-    /// test or internal-performance contexts. **Never use this with untrusted input.**
-    #[cfg(feature = "hazmat")]
-    pub fn to_backend_unchecked(&self) -> BackendProjective {
-        self.to_backend_unvalidated()
-    }
 
     /// Internal method to convert to a backend projective point without validation.
     pub(crate) fn to_backend_unvalidated(&self) -> BackendProjective {
@@ -355,27 +290,17 @@ impl ProjectivePoint {
         }
     }
 
-    /// Group doubling using the backend, bypassing the prime-order-subgroup
-    /// assertion (unlike [`Group::double`] which uses `From` conversions).
-    ///
-    /// This is the counterpart to [`to_backend_unchecked`](Self::to_backend_unchecked)
-    /// for the doubling operation. Use it only when you need to double a point
-    /// that is known to be on-curve but may not be in the prime-order subgroup.
-    /// **Never use this with untrusted input.**
-    #[cfg(feature = "hazmat")]
-    pub fn double_unchecked(&self) -> Self {
+    // Group doubling using the backend, bypassing the prime-order-subgroup
+    // assertion. For internal/test use only.
+    #[allow(dead_code)]
+    pub(crate) fn double_unchecked(&self) -> Self {
         self.to_backend_unvalidated().double().into()
     }
 
-    /// Scalar multiplication using the backend, bypassing the prime-order-subgroup
-    /// assertion (unlike the `*` operator which uses `From` conversions).
-    ///
-    /// This is the counterpart to [`to_backend_unchecked`](Self::to_backend_unchecked)
-    /// for scalar multiplication. Use it only when you need to multiply a point
-    /// that is known to be on-curve but may not be in the prime-order subgroup.
-    /// **Never use this with untrusted input.**
-    #[cfg(feature = "hazmat")]
-    pub fn mul_unchecked(&self, scalar: &Scalar) -> Self {
+    // Scalar multiplication using the backend, bypassing the prime-order-subgroup
+    // assertion. For internal/test use only.
+    #[allow(dead_code)]
+    pub(crate) fn mul_unchecked(&self, scalar: &Scalar) -> Self {
         let result = self.to_backend_unvalidated() * scalar.0;
         result.into()
     }
@@ -444,10 +369,9 @@ impl ProjectivePoint {
     /// via the `+` operator, which converts through
     /// `From<ProjectivePoint> for BackendProjective` and asserts subgroup
     /// membership. For points that may be on-curve but outside the prime-order
-    /// subgroup (e.g. torsion points built with `ProjectivePoint::new_unchecked`)
-    /// use `ProjectivePoint::mul_unchecked` or
-    /// [`ProjectivePoint::mul_with_cofactor_clear`] instead. The same subgroup
-    /// assertion applies to the `*` operator and [`Group::double`].
+    /// subgroup (e.g. torsion points) use [`ProjectivePoint::mul_with_cofactor_clear`]
+    /// instead. The same subgroup assertion applies to the `*` operator and
+    /// [`Group::double`].
     ///
     /// # Timing
     ///
@@ -1089,9 +1013,7 @@ impl From<ProjectivePoint> for AffinePoint {
     /// # Panics
     ///
     /// Panics if `point` has `z == 0` (an invalid projective point). See
-    /// [`ProjectivePoint::to_affine`]. Only the explicitly-unchecked constructors
-    /// (`ProjectivePoint::new_unchecked` / `ProjectivePoint::from_raw_parts`)
-    /// and the derived `Default` can produce such a point; validate untrusted
+    /// [`ProjectivePoint::to_affine`]. Validate untrusted
     /// input with [`ProjectivePoint::is_on_curve`] before converting.
     fn from(point: ProjectivePoint) -> Self {
         point.to_affine()
@@ -1116,8 +1038,8 @@ impl From<ProjectivePoint> for BackendProjective {
     /// (the backend `BackendProjective::new` asserts subgroup membership). This is
     /// the assertion that makes the arithmetic operators (`+`, `-`, `*`,
     /// [`Group::double`], [`ProjectivePoint::mul_fixed_schedule`]) panic on
-    /// torsion/small-subgroup inputs. Use `ProjectivePoint::to_backend_unchecked`
-    /// (and the `*_unchecked` helpers) to operate on such points without panicking.
+    /// torsion/small-subgroup inputs. Use `ProjectivePoint::to_backend_unvalidated`
+    /// (and the internal `*_unchecked` helpers) to operate on such points without panicking.
     fn from(point: ProjectivePoint) -> Self {
         // Identity shortcut: BackendProjective::new asserts the subgroup for all
         // non-identity points, so calling it for the identity would panic.
@@ -2030,7 +1952,6 @@ mod tests {
 
     /// Test AffinePoint::new_unchecked
     #[test]
-    #[cfg(feature = "hazmat")]
     fn test_affine_point_new_unchecked() {
         let affine = AffinePoint::new_unchecked(BackendBaseField::ONE, BackendBaseField::ONE);
         assert_eq!(affine.x, BackendBaseField::ONE);
@@ -2068,7 +1989,6 @@ mod tests {
 
     /// Test ProjectivePoint::new_unchecked
     #[test]
-    #[cfg(feature = "hazmat")]
     fn test_projective_point_new_unchecked() {
         let point = ProjectivePoint::new_unchecked(
             BackendBaseField::ONE,
@@ -2900,7 +2820,6 @@ mod tests {
     /// clearing: `[8]P` projects any point onto the prime-order subgroup, and
     /// `mul_with_cofactor_clear` applies this automatically.
     #[test]
-    #[cfg(feature = "hazmat")]
     fn test_cofactor_clearing_security() {
         // The order-2 element P2 = (0, -1) is on the curve but NOT in the
         // prime-order subgroup. It is its own negation: 2*P2 == IDENTITY.
