@@ -73,8 +73,6 @@ pub use taceo_ark_babyjubjub::Fq as BackendBaseField;
 pub use taceo_ark_babyjubjub::Fr as BackendScalar;
 
 // ===== Import required traits for BackendScalar operations =====
-#[cfg(test)]
-use ark_ec::CurveConfig;
 use ark_ec::PrimeGroup;
 use ark_ff::fields::{AdditiveGroup, FftField, Field as ArkField, PrimeField as ArkPrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
@@ -1513,6 +1511,7 @@ impl Scalar {
 
 #[cfg(test)]
 mod tests {
+    use ark_ec::CurveConfig;
     use super::*;
     // `to_bytes_be` / `num_bits` on the backend's `BigInt` come from this trait.
     use ark_ff::BigInteger;
