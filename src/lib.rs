@@ -491,41 +491,53 @@ impl ProjectivePoint {
     /// Scalar multiplication that additionally clears the cofactor, producing a
     /// point guaranteed to be in the prime-order subgroup.
     ///
-    /// BabyJubJub has cofactor 8, so every point `P` can be written as
-    /// `P = [8]Q` for a unique `Q` in the prime-order subgroup (the "subgroup
-    /// component" of `P`). Plain scalar multiplication `[s]P` preserves the
-    /// subgroup component: `Q` is multiplied by `s` but is never eliminated.
+    /// BabyJubJub has cofactor 8: the full curve group is the (internal) direct
+    /// sum of the prime-order subgroup (order `r`) and a torsion subgroup of
+    /// order 8. Every point therefore splits uniquely as `P = Q + T`, with `Q`
+    /// in the prime-order subgroup and `T` in the torsion subgroup. Every
+    /// torsion point has order dividing 8, so the cofactor annihilates it
+    /// (`[8]T = O`) and `[8]P = [8]Q` always lies in the prime-order subgroup.
+    /// Plain scalar multiplication `[s]P`, by contrast, leaves the torsion
+    /// component (`[s]T`) intact, so its result need not lie in the prime-order
+    /// subgroup.
     ///
     /// **Security impact.** Protocols that multiply an attacker-supplied point
     /// by a secret scalar while expecting a prime-order-subgroup result are
     /// vulnerable to small-subgroup attacks when the attacker can control the
-    /// subgroup component of `P`. This method should be used instead of the
+    /// torsion component of `P`. This method should be used instead of the
     /// plain `*` operator whenever the caller needs the result to be provably
-    /// in the prime-order subgroup and the input point is not already known to
+    /// in the prime-order subgroup and the input point is not yet known to
     /// be in it (e.g., points decoded from untrusted input).
     ///
     /// This computes `[8s]P` using the **integer** product `8 * s`, which equals
-    /// `[8s]Q` (the torsion component, having order dividing the cofactor 8, is
-    /// annihilated by the factor of 8). It is `IDENTITY` when `8s` is a multiple
-    /// of the subgroup order `r`.
+    /// `[8s]Q` (the factor of 8
+    /// annihilates the torsion component, having the order dividing cofactor 8).
+    /// The result is `IDENTITY` exactly when
+    /// `[8s]Q = O`: either `P` is pure torsion (`Q` is the identity, so the
+    /// result is `IDENTITY` for any `s`) or `Q` has full order `r` and `8s` is a
+    /// multiple of `r`.
     ///
-    /// The cofactor multiply is done over the integers, **not** in the scalar
+    /// The cofactor multiplication is done over the integers, **not** in the scalar
     /// field: `8 * s mod r` is generally *not* a multiple of 8 (`r` is odd), so
     /// reducing modulo `r` would leave the torsion component intact and defeat
     /// the cofactor clearing entirely.
     pub fn mul_with_cofactor_clear(&self, scalar: &Scalar) -> Self {
-        // Build the integer 8 * s (without reducing mod r) and feed it to the
-        // backend's integer scalar multiplication. `s < r < 2^251`, so `8 * s`
-        // fits comfortably in five 64-bit limbs.
+        // Build integer 8 * s (without reducing mod r) and feed it to the
+        // backend's integer scalar multiplication. Since `s < r < 2^251`, the
+        // product `8 * s < 2^254` fits in four 64-bit limbs and never carries
+        // out of the top limb. Sizing the slice at four limbs (rather than five)
+        // keeps the backend's fixed-length Montgomery ladder at 256 iterations
+        // instead of 320.
         let s = scalar.0.into_bigint().0;
-        let mut wide = [0u64; 5];
+        let mut wide = [0u64; 4];
         let mut carry = 0u128;
         for (i, &limb) in s.iter().enumerate() {
             let acc = (limb as u128) * (COFACTOR as u128) + carry;
             wide[i] = acc as u64;
             carry = acc >> 64;
         }
-        wide[4] = carry as u64;
+        // `8 * s < 2^254` guarantees no carry escapes the fourth limb.
+        debug_assert_eq!(carry, 0, "8 * s must fit in four 64-bit limbs");
         let result = self.to_backend_unvalidated().mul_bigint(wide);
         result.into()
     }
@@ -1854,7 +1866,8 @@ mod tests {
             let result_as_backend: BackendProjective = result_ours.into();
 
             assert_eq!(
-                result_as_backend, result_backend,
+                result_as_backend,
+                result_backend,
                 "Scalar multiplication mismatch, seed = {}",
                 hex::encode(seed)
             );
@@ -2826,7 +2839,10 @@ mod tests {
         assert!(ProjectivePoint::GENERATOR.is_on_curve());
 
         // (0, -1) is the order-2 point: on the curve but NOT in the subgroup.
-        let order2 = AffinePoint { x: BackendBaseField::ZERO, y: -BackendBaseField::ONE };
+        let order2 = AffinePoint {
+            x: BackendBaseField::ZERO,
+            y: -BackendBaseField::ONE,
+        };
         assert!(order2.is_on_curve());
         assert!(!order2.is_in_prime_order_subgroup());
         assert!(
@@ -2839,7 +2855,10 @@ mod tests {
         assert!(AffinePoint::new(g.x, g.y).is_some());
 
         // (1, 2) is off the curve.
-        let off = AffinePoint { x: BackendBaseField::ONE, y: BackendBaseField::from(2u64) };
+        let off = AffinePoint {
+            x: BackendBaseField::ONE,
+            y: BackendBaseField::from(2u64),
+        };
         assert!(!off.is_on_curve());
 
         // Invalid projective coordinates with z == 0 must not be normalized to
@@ -3015,7 +3034,8 @@ mod tests {
             "mul_with_cofactor_clear(s) must equal [8s]G on a subgroup point"
         );
         assert!(
-            g.mul_with_cofactor_clear(&s_big).is_in_prime_order_subgroup(),
+            g.mul_with_cofactor_clear(&s_big)
+                .is_in_prime_order_subgroup(),
             "cofactor-cleared result must be in the prime-order subgroup"
         );
     }

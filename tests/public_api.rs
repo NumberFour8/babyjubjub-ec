@@ -2,7 +2,9 @@
 //!
 //! These tests exercise only the public API and can be run as integration tests.
 
-use babyjubjub_ec::{AffinePoint, BabyJubJub, BackendBaseField, GroupRepr, ProjectivePoint, Scalar};
+use babyjubjub_ec::{
+    AffinePoint, BabyJubJub, BackendBaseField, GroupRepr, ProjectivePoint, Scalar,
+};
 use group::ff::{Field, PrimeField};
 use group::{Group, GroupEncoding};
 use subtle::{ConditionallySelectable, ConstantTimeEq};
@@ -684,9 +686,7 @@ fn test_ct_eq_projective_scaled_and_identity() {
     assert!(bool::from(p.ct_eq(&scaled)));
     assert!(!bool::from(p.ct_eq(&g)));
     // Identity in two representations.
-    assert!(bool::from(
-        ProjectivePoint::IDENTITY.ct_eq(&(g + (-g)))
-    ));
+    assert!(bool::from(ProjectivePoint::IDENTITY.ct_eq(&(g + (-g)))));
 }
 
 #[test]
@@ -695,7 +695,11 @@ fn test_ct_eq_projective_does_not_panic_on_zero_z() {
     // (the cross-multiplication implementation needs no inversion).
     let zero = BackendBaseField::from(0u64);
     let one = BackendBaseField::from(1u64);
-    let invalid = ProjectivePoint { x: zero, y: one, z: zero };
+    let invalid = ProjectivePoint {
+        x: zero,
+        y: one,
+        z: zero,
+    };
     // Comparing equal invalid points returns true; comparing to the generator false.
     assert!(bool::from(invalid.ct_eq(&invalid)));
     assert!(!bool::from(invalid.ct_eq(&ProjectivePoint::GENERATOR)));
@@ -711,9 +715,15 @@ fn test_from_bytes_rejects_noncanonical_identity_sign_bit() {
     // x == -x == 0, an encoding with that bit set is a second, non-canonical
     // encoding of the identity and must be rejected (non-malleability).
     let canonical = ProjectivePoint::IDENTITY.to_bytes();
-    assert_eq!(canonical.as_ref()[31] & 0x80, 0, "canonical identity has sign bit 0");
+    assert_eq!(
+        canonical.as_ref()[31] & 0x80,
+        0,
+        "canonical identity has sign bit 0"
+    );
     // The canonical identity still decodes.
-    assert!(bool::from(ProjectivePoint::from_bytes(&canonical).is_some()));
+    assert!(bool::from(
+        ProjectivePoint::from_bytes(&canonical).is_some()
+    ));
 
     let mut malleated = canonical;
     malleated.0[31] |= 0x80;
@@ -736,7 +746,11 @@ fn test_is_on_curve_scaled_projective() {
     assert!(p.is_on_curve());
     // Perturbing a coordinate takes it off the curve (exercises the false branch
     // of the projective curve equation with z != 1).
-    let bad = ProjectivePoint { x: p.x + BackendBaseField::from(1u64), y: p.y, z: p.z };
+    let bad = ProjectivePoint {
+        x: p.x + BackendBaseField::from(1u64),
+        y: p.y,
+        z: p.z,
+    };
     assert!(!bad.is_on_curve());
 }
 
@@ -766,7 +780,12 @@ fn test_group_random_is_in_prime_order_subgroup() {
 #[test]
 fn test_mul_ct_matches_mul_fixed_schedule() {
     let g = ProjectivePoint::GENERATOR;
-    for s in [Scalar::ZERO, Scalar::ONE, Scalar::from(42u64), Scalar::ZERO - Scalar::ONE] {
+    for s in [
+        Scalar::ZERO,
+        Scalar::ONE,
+        Scalar::from(42u64),
+        Scalar::ZERO - Scalar::ONE,
+    ] {
         assert_eq!(
             g.mul_ct(&s).to_affine(),
             g.mul_fixed_schedule(&s).to_affine()
@@ -778,7 +797,12 @@ fn test_mul_ct_matches_mul_fixed_schedule() {
 
 #[test]
 fn test_prime_field_repr_round_trip() {
-    for s in [Scalar::ZERO, Scalar::ONE, Scalar::from(42u64), Scalar::ZERO - Scalar::ONE] {
+    for s in [
+        Scalar::ZERO,
+        Scalar::ONE,
+        Scalar::from(42u64),
+        Scalar::ZERO - Scalar::ONE,
+    ] {
         let repr = s.to_repr();
         let back = Scalar::from_repr(repr);
         assert!(bool::from(back.is_some()));
