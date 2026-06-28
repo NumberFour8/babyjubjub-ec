@@ -861,6 +861,31 @@ fn test_babyjubjub_implements_prime_curve() {
     let _ = <BabyJubJub as elliptic_curve::Curve>::ORDER;
 }
 
+// ==================== CofactorGroup Tests ====================
+
+#[test]
+fn test_projective_point_implements_cofactor_group() {
+    use babyjubjub_ec::group::cofactor::CofactorGroup;
+    use babyjubjub_ec::group::prime::PrimeGroup;
+
+    // Compile-time check that ProjectivePoint satisfies the CofactorGroup and
+    // PrimeGroup bounds, with the subgroup type being ProjectivePoint itself.
+    fn assert_cofactor_group<G>()
+    where
+        G: CofactorGroup<Subgroup = ProjectivePoint> + PrimeGroup,
+    {
+    }
+    assert_cofactor_group::<ProjectivePoint>();
+
+    // Functional sanity check through the public trait surface: the generator is
+    // torsion free, `into_subgroup` accepts it, and clearing the cofactor keeps
+    // it inside the prime-order subgroup.
+    let g = ProjectivePoint::GENERATOR;
+    assert!(bool::from(g.is_torsion_free()));
+    assert!(bool::from(g.into_subgroup().is_some()));
+    assert!(g.clear_cofactor().is_in_prime_order_subgroup());
+}
+
 // ==================== CurveArithmetic Tests ====================
 
 #[test]

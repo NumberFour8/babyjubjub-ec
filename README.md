@@ -143,6 +143,11 @@ let decoded = ProjectivePoint::from_bytes(&bytes);
   - conversions to/from `U256`, `ScalarPrimitive`, `FieldBytes`, `NonZeroScalar`,
     and `NonIdentity`, plus `Scalar * Point` multiplication in both operand orders
 - `group::Group` for `ProjectivePoint`
+- `group::prime::PrimeGroup` and `group::cofactor::CofactorGroup` for
+  `ProjectivePoint` (with `Subgroup = ProjectivePoint`). `clear_cofactor`
+  multiplies by the cofactor 8 to map any point — including torsion points — into
+  the prime-order subgroup, while `is_torsion_free` / `into_subgroup` report
+  subgroup membership.
 - `group::ff::Field` for `Scalar`
 - `group::ff::PrimeField` for `Scalar`. **Note:** `PrimeField::Repr` is now
   `elliptic_curve::FieldBytes<BabyJubJub>` (i.e. `Array<u8, U32>`) rather than

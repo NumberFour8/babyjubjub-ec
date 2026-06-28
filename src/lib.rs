@@ -735,6 +735,64 @@ impl ConditionallySelectable for ProjectivePoint {
 
 impl DefaultIsZeroes for ProjectivePoint {}
 
+// ===== Cofactor group trait implementations =====
+
+// BabyJubJub is exposed through the `elliptic-curve` traits as a prime-order
+// group: `Scalar` is the 251-bit prime-order subgroup order `r`,
+// `Group::generator` returns the subgroup generator, and
+// `GroupEncoding::from_bytes` rejects points outside the prime-order subgroup.
+// Marking `ProjectivePoint` as a `PrimeGroup` is therefore consistent with the
+// existing `elliptic_curve::PrimeCurve for BabyJubJub` assertion, and lets
+// `ProjectivePoint` act as its own `CofactorGroup::Subgroup`.
+impl group::prime::PrimeGroup for ProjectivePoint {}
+
+impl group::cofactor::CofactorGroup for ProjectivePoint {
+    type Subgroup = ProjectivePoint;
+
+    /// Maps any curve point onto the prime-order subgroup by multiplying it by
+    /// the cofactor 8 (i.e. `k = 1` times the cofactor).
+    ///
+    /// BabyJubJub has cofactor 8, so every point splits uniquely as `P = Q + T`
+    /// with `Q` in the prime-order subgroup and `T` a torsion point of order
+    /// dividing 8. Because `[8]T = O`, the result `[8]P = [8]Q` always lies in
+    /// the prime-order subgroup; it is the identity exactly when `Q = O` (i.e.
+    /// when `P` is pure torsion).
+    ///
+    /// Implemented as three doublings (`[8]P = [2][2][2]P`) on the backend's
+    /// complete (exception-free) doubling formula, *bypassing* the
+    /// prime-order-subgroup assertion enforced by [`Group::double`] and the `+`
+    /// operator so that torsion inputs are accepted. Like the rest of the crate
+    /// this is almost — but not end-to-end — constant-time (see the crate-level
+    /// `Security` notes). To clear the cofactor *and* multiply by a scalar in a
+    /// single operation, use [`ProjectivePoint::mul_with_cofactor_clear`].
+    fn clear_cofactor(&self) -> Self::Subgroup {
+        // [8]P = [2]([2]([2]P)); `double_unchecked` skips the subgroup assertion.
+        self.double_unchecked()
+            .double_unchecked()
+            .double_unchecked()
+    }
+
+    /// Returns `self` if it lies in the prime-order subgroup, otherwise
+    /// `CtOption::none()`.
+    ///
+    /// Membership is decided by [`ProjectivePoint::is_in_prime_order_subgroup`],
+    /// which normalizes to affine via a field inversion and is therefore **not**
+    /// constant-time with respect to `self`.
+    fn into_subgroup(self) -> CtOption<Self::Subgroup> {
+        CtOption::new(self, self.is_torsion_free())
+    }
+
+    /// Returns `true` iff this element is torsion free, i.e. lies in the
+    /// prime-order subgroup.
+    ///
+    /// Delegates to [`ProjectivePoint::is_in_prime_order_subgroup`]. As noted
+    /// there, this normalizes to affine coordinates and is **not** constant-time
+    /// with respect to `self`.
+    fn is_torsion_free(&self) -> subtle::Choice {
+        subtle::Choice::from(self.is_in_prime_order_subgroup() as u8)
+    }
+}
+
 // ===== GroupEncoding trait implementations =====
 
 /// Canonical compressed encoding of a [`ProjectivePoint`].
@@ -3583,5 +3641,87 @@ mod tests {
         let b = AffinePoint::from(ProjectivePoint::GENERATOR);
         // Cover AffinePoint::ct_eq (1478-1480)
         let _ = a.ct_eq(&b);
+    }
+
+    /// Exercises the `CofactorGroup` implementation on `ProjectivePoint`:
+    /// `clear_cofactor`, `into_subgroup`, `is_torsion_free`, and the default
+    /// `is_small_order`, on subgroup, identity, torsion, and mixed points.
+    #[test]
+    fn test_cofactor_group_trait() {
+        use group::cofactor::CofactorGroup;
+
+        let g = ProjectivePoint::GENERATOR;
+        let id = ProjectivePoint::IDENTITY;
+
+        // The order-2 torsion point (0, -1): on-curve but outside the prime-order
+        // subgroup (see `test_cofactor_clearing_security`). Built via a struct
+        // literal so no subgroup assertion is triggered.
+        let p2 = ProjectivePoint {
+            x: BackendBaseField::ZERO,
+            y: -BackendBaseField::ONE,
+            z: BackendBaseField::ONE,
+        };
+
+        // --- Prime-order-subgroup elements are torsion free ---
+        assert!(bool::from(g.is_torsion_free()), "generator is torsion free");
+        assert!(bool::from(id.is_torsion_free()), "identity is torsion free");
+        assert_eq!(
+            Option::from(g.into_subgroup()),
+            Some(g),
+            "into_subgroup must return a subgroup point unchanged"
+        );
+        assert_eq!(Option::from(id.into_subgroup()), Some(id));
+        // A subgroup generator is not of small order, and clearing the cofactor
+        // keeps it inside the subgroup.
+        assert!(
+            !bool::from(g.is_small_order()),
+            "generator is not small order"
+        );
+        assert!(
+            g.clear_cofactor().is_in_prime_order_subgroup(),
+            "clear_cofactor of a subgroup point stays in the subgroup"
+        );
+
+        // --- Torsion point: not torsion free, small order, clears to identity ---
+        assert!(
+            !bool::from(p2.is_torsion_free()),
+            "order-2 point is not torsion free"
+        );
+        assert!(
+            bool::from(p2.into_subgroup().is_none()),
+            "into_subgroup must reject a torsion point"
+        );
+        assert!(
+            bool::from(p2.is_small_order()),
+            "order-2 point is small order"
+        );
+        assert!(
+            p2.clear_cofactor().is_identity(),
+            "[8]P2 must be the identity (order divides 8)"
+        );
+
+        // --- Mixed point Q = G + P2 (subgroup + torsion) ---
+        // Built with unchecked backend addition so the torsion component
+        // survives; clearing the cofactor drops it, yielding [8]G.
+        let mixed: ProjectivePoint =
+            (g.to_backend_unvalidated() + p2.to_backend_unvalidated()).into();
+        assert!(
+            !bool::from(mixed.is_torsion_free()),
+            "G + P2 carries a torsion component"
+        );
+        let cleared = mixed.clear_cofactor();
+        assert!(
+            cleared.is_in_prime_order_subgroup(),
+            "clear_cofactor must land in the prime-order subgroup"
+        );
+        assert_eq!(
+            cleared,
+            g.clear_cofactor(),
+            "[8](G + P2) must equal [8]G (torsion annihilated)"
+        );
+        assert!(
+            bool::from(cleared.into_subgroup().is_some()),
+            "a cofactor-cleared point must be accepted by into_subgroup"
+        );
     }
 }
