@@ -125,6 +125,7 @@ let decoded = ProjectivePoint::from_bytes(&bytes);
 | `ProjectivePoint` | Projective point representation (x, y, z coordinates) |
 | `Scalar` | Scalar field element |
 | `GroupRepr` | Group element representation for serialization |
+| `FieldElement` | Base-field intermediate used by hash-to-curve (`GroupDigest::FieldElement`) |
 
 ### Traits Implemented
 
@@ -154,6 +155,13 @@ let decoded = ProjectivePoint::from_bytes(&bytes);
   `[u8; 32]`, as `CurveArithmetic` mandates. If you have a `[u8; 32]`, pass
   `bytes.into()` to `from_repr` / `from_repr_vartime`.
 - `group::GroupEncoding` for `ProjectivePoint` and `AffinePoint`
+- `elliptic_curve::hash2curve::GroupDigest` for `BabyJubJub` (RFC 9380
+  hash-to-curve). `hash_from_bytes` / `encode_from_bytes` map arbitrary byte
+  strings to prime-order-subgroup points via the twisted-Edwards **Elligator2**
+  map (`FieldElement` as `GroupDigest::FieldElement`) followed by cofactor
+  clearing; `hash_to_scalar` is available since `Scalar` implements
+  `hash2curve::FromOkm`. The expander/hash is caller-chosen, e.g.
+  `BabyJubJub::hash_from_bytes::<ExpandMsgXmd<sha2::Sha256>>(&[msg], &[dst])`.
 - `subtle::ConditionallySelectable` and `subtle::ConstantTimeEq` for
   `ProjectivePoint`, `AffinePoint`, `Scalar`
 - `zeroize::DefaultIsZeroes` for all point and scalar types (**unconditional**)

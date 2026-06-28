@@ -16,7 +16,10 @@ ark-ec = { version = "0.5", default-features = false }
 ark-ff = { version = "0.5", default-features = false }
 ark-serialize = { version = "0.5", default-features = false }
 # elliptic-curve traits
-elliptic-curve = { version = "0.13.8", default-features = false, features = ["arithmetic"] }
+# `hash2curve` adds the `GroupDigest` / hash-to-curve traits (RFC 9380). It only
+# pulls in `arithmetic` + `digest` (no `std`/`alloc`), so the no_std build is
+# unaffected.
+elliptic-curve = { version = "0.13.8", default-features = false, features = ["arithmetic", "hash2curve"] }
 # Scalar field operations
 ff = { version = "0.13", default-features = false }
 # group crate for core group traits
@@ -51,6 +54,9 @@ hex = "0.4"
 # `std_rng` is required by tests that use `StdRng`; declare it explicitly rather
 # than relying on transitive feature unification from ark-std.
 rand = { version = "0.8" }
+# Concrete hash for the hash-to-curve (`GroupDigest`) tests, used as the
+# `ExpandMsgXmd<Sha256>` expander. Only needed by tests, hence a dev-dependency.
+sha2 = { version = "0.10", default-features = false }
 
 [[bench]]
 name = "scalar_mult"

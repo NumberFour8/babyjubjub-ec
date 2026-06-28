@@ -110,6 +110,14 @@ use elliptic_curve::ops::{Invert, LinearCombination, MulByGenerator, Reduce};
 use elliptic_curve::point::{AffineCoordinates, NonIdentity};
 use elliptic_curve::scalar::{FromUintUnchecked, IsHigh};
 use elliptic_curve::{BatchNormalize, Error as EcError, FieldBytes, ScalarPrimitive};
+// ===== Imports for hash-to-curve (`GroupDigest`, RFC 9380) =====
+// `MontCurveConfig` exposes the backend's Montgomery-form coefficients (A, B);
+// `BigInteger` provides `is_odd` for the `sgn0` sign function; the
+// `hash2curve` traits are the ones being implemented below.
+use ark_ec::twisted_edwards::MontCurveConfig;
+use ark_ff::BigInteger;
+use elliptic_curve::hash2curve::{FromOkm, GroupDigest, MapToCurve};
+use taceo_ark_babyjubjub::EdwardsConfig;
 
 /// BabyJubJub curve type
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -791,6 +799,159 @@ impl group::cofactor::CofactorGroup for ProjectivePoint {
     fn is_torsion_free(&self) -> subtle::Choice {
         subtle::Choice::from(self.is_in_prime_order_subgroup() as u8)
     }
+}
+
+// ===== Hash-to-curve (`GroupDigest`, RFC 9380) =====
+
+/// Elligator2 non-square constant `Z` for the BabyJubJub base field `Fq`.
+///
+/// RFC 9380 ([Appendix H.3 / `find_z_ell2`]) mandates that `Z` be the non-square
+/// of lowest absolute value when field elements are taken in the symmetric range
+/// `[-(q-1)/2, (q-1)/2]`. For `Fq` the values `±1, ±2, ±3, ±4` are all squares,
+/// and `5` is the first non-square, so `Z = 5`. This is asserted by
+/// `test_elligator2_z_is_canonical`.
+///
+/// [Appendix H.3 / `find_z_ell2`]: https://www.rfc-editor.org/rfc/rfc9380#name-elligator-2-method
+const ELLIGATOR2_Z: BackendBaseField = ark_ff::MontFp!("5");
+
+/// Base-field element used as the intermediate value when hashing to the
+/// BabyJubJub curve (the [`GroupDigest::FieldElement`] associated type).
+///
+/// This is a thin newtype around the base field `Fq` ([`BackendBaseField`]); it
+/// exists so the foreign [`FromOkm`] / [`MapToCurve`] traits can be implemented
+/// (the orphan rule forbids implementing them directly on the backend's `Fq`).
+/// You normally never construct this type yourself — it is produced internally
+/// by [`GroupDigest::hash_from_bytes`] / [`GroupDigest::encode_from_bytes`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FieldElement(pub BackendBaseField);
+
+/// The `sgn0` "sign" function of RFC 9380 §4.1 for the prime field `Fq`:
+/// returns `true` iff the canonical integer representative of `x` is odd.
+///
+/// This matches `ark_ec::hashing::curve_maps::parity` for a prime base field
+/// (where the only base-prime-field element is `x` itself, and `sgn0(0)` is
+/// `false` because `0` is even).
+fn sgn0(x: &BackendBaseField) -> bool {
+    x.into_bigint().is_odd()
+}
+
+/// The RFC 9380 Elligator2 map for twisted Edwards BabyJubJub.
+///
+/// Maps an arbitrary base-field element `u` to a point on the curve by applying
+/// the Elligator2 map to BabyJubJub's birationally-equivalent Montgomery curve
+/// (`v² = w³ + A·w² + w`, with `A = 168698`, `B = 1`) and then the rational map
+/// to the twisted Edwards model (RFC 9380 Appendix D). The result is guaranteed
+/// to be on the curve but is **not** necessarily in the prime-order subgroup;
+/// callers (e.g. [`GroupDigest::hash_from_bytes`]) compose this with
+/// [`CofactorGroup::clear_cofactor`](group::cofactor::CofactorGroup::clear_cofactor).
+///
+/// This is a direct transcription of `ark_ec`'s `Elligator2Map::map_to_curve`,
+/// specialized to `B = 1`; `test_map_to_curve_matches_arkworks` cross-checks it
+/// against the arkworks implementation for a range of inputs.
+///
+/// Not constant-time: `legendre`, `sqrt`, and `inverse` on the arkworks backend
+/// have input-dependent timing. Hash-to-curve inputs are public, so this is not
+/// a concern for the standard use case.
+fn map_to_curve_elligator2(u: BackendBaseField) -> ProjectivePoint {
+    let one = BackendBaseField::ONE;
+
+    // Montgomery coefficients, read from the backend so the curve constants have
+    // a single source of truth. BabyJubJub uses `B = 1`, which simplifies the
+    // map: `K = B = 1`, `J/K = A`, and `1/K² = 1`.
+    let mont_a = <EdwardsConfig as MontCurveConfig>::COEFF_A;
+    debug_assert_eq!(
+        <EdwardsConfig as MontCurveConfig>::COEFF_B,
+        one,
+        "BabyJubJub Montgomery B must be 1"
+    );
+    let k = one;
+    let j_on_k = mont_a;
+    let ksq_inv = one;
+
+    // x1 = -(J/K) / (1 + Z·u²); a zero denominator is replaced by 1 (then x1 = 0).
+    let den_1 = one + ELLIGATOR2_Z * u.square();
+    let x1 = -j_on_k / if den_1.is_zero() { one } else { den_1 };
+    let x1sq = x1.square();
+    let gx1 = x1sq * x1 + j_on_k * x1sq + x1 * ksq_inv;
+
+    // x2 = -x1 - (J/K).
+    let x2 = -x1 - j_on_k;
+    let x2sq = x2.square();
+    let gx2 = x2sq * x2 + j_on_k * x2sq + x2 * ksq_inv;
+
+    // Choose the branch whose `g(x)` is a square; `sgn0` then fixes y's sign so
+    // the map is deterministic (sgn0(y) == 1 on the gx1 branch, 0 on the gx2).
+    let (x, mut y, sgn0_target) = if gx1.legendre().is_qr() {
+        (x1, gx1.sqrt().expect("gx1 is a quadratic residue"), true)
+    } else {
+        (
+            x2,
+            gx2.sqrt().expect("gx2 is a quadratic residue (gx1 is not)"),
+            false,
+        )
+    };
+    if sgn0(&y) != sgn0_target {
+        y = -y;
+    }
+
+    // Affine Montgomery point (s, t) = (x·K, y·K).
+    let s = x * k;
+    let t = y * k;
+
+    // Rational map Montgomery -> twisted Edwards (RFC 9380 Appendix D).
+    let tv1 = s + one;
+    let tv2 = tv1 * t;
+    let (v, w) = if tv2.is_zero() {
+        (BackendBaseField::ZERO, one)
+    } else {
+        let tv2_inv = tv2.inverse().expect("a nonzero element has an inverse");
+        (tv2_inv * tv1 * s, tv2_inv * t * (s - one))
+    };
+
+    // `(v, w)` is an affine BabyJubJub point; with `z = 1` the projective
+    // representation `(v : w : 1)` denotes exactly that affine point.
+    ProjectivePoint { x: v, y: w, z: one }
+}
+
+impl FromOkm for FieldElement {
+    // L = ceil((ceil(log2 q) + 128) / 8) = ceil((254 + 128) / 8) = 48 bytes.
+    type Length = elliptic_curve::consts::U48;
+
+    /// Interprets the 48 bytes of output keying material as a big-endian integer
+    /// and reduces it modulo the base-field prime `q` (RFC 9380 `OS2IP`/`mod`).
+    fn from_okm(data: &elliptic_curve::generic_array::GenericArray<u8, Self::Length>) -> Self {
+        FieldElement(BackendBaseField::from_be_bytes_mod_order(data.as_slice()))
+    }
+}
+
+impl MapToCurve for FieldElement {
+    type Output = ProjectivePoint;
+
+    fn map_to_curve(&self) -> Self::Output {
+        map_to_curve_elligator2(self.0)
+    }
+}
+
+impl FromOkm for Scalar {
+    // L = ceil((ceil(log2 r) + 128) / 8) = ceil((251 + 128) / 8) = 48 bytes.
+    type Length = elliptic_curve::consts::U48;
+
+    /// Interprets the 48 bytes of output keying material as a big-endian integer
+    /// and reduces it modulo the scalar-field prime `r`. Enables
+    /// [`GroupDigest::hash_to_scalar`].
+    fn from_okm(data: &elliptic_curve::generic_array::GenericArray<u8, Self::Length>) -> Self {
+        Scalar(BackendScalar::from_be_bytes_mod_order(data.as_slice()))
+    }
+}
+
+/// Hash arbitrary byte strings to BabyJubJub points/scalars per RFC 9380.
+///
+/// The prime-order group used by `hash_from_bytes` / `encode_from_bytes` is the
+/// cofactor-cleared subgroup (see [`CofactorGroup`](group::cofactor::CofactorGroup)).
+/// The expander and its hash are chosen by the caller, e.g.
+/// `BabyJubJub::hash_from_bytes::<ExpandMsgXmd<sha2::Sha256>>(&[msg], &[dst])`.
+impl GroupDigest for BabyJubJub {
+    type FieldElement = FieldElement;
 }
 
 // ===== GroupEncoding trait implementations =====
@@ -3723,5 +3884,201 @@ mod tests {
             bool::from(cleared.into_subgroup().is_some()),
             "a cofactor-cleared point must be accepted by into_subgroup"
         );
+    }
+
+    // ===== Hash-to-curve (`GroupDigest`) tests =====
+
+    /// The Elligator2 `Z` must be the non-square of lowest absolute value
+    /// (RFC 9380 `find_z_ell2`): `±1..±4` are squares and `5` is the first
+    /// non-square in `Fq`.
+    #[test]
+    fn test_elligator2_z_is_canonical() {
+        assert!(
+            ELLIGATOR2_Z.legendre().is_qnr(),
+            "Z must be a quadratic non-residue"
+        );
+        for n in 1u64..=4 {
+            let pos = BackendBaseField::from(n);
+            assert!(pos.legendre().is_qr(), "{n} should be a square in Fq");
+            assert!((-pos).legendre().is_qr(), "-{n} should be a square in Fq");
+        }
+        assert_eq!(
+            ELLIGATOR2_Z,
+            BackendBaseField::from(5u64),
+            "Z must equal 5 (the lowest-|.| non-square)"
+        );
+    }
+
+    /// Cross-check our hand-rolled [`map_to_curve_elligator2`] against the
+    /// reference `ark_ec::Elligator2Map` for a range of inputs, using a local
+    /// arkworks config (`Bjj`) whose constants are taken from the backend.
+    #[test]
+    fn test_map_to_curve_matches_arkworks() {
+        use ark_ec::hashing::curve_maps::elligator2::Elligator2Map;
+        use ark_ec::hashing::map_to_curve_hasher::MapToCurve as ArkMapToCurve;
+        use ark_ec::twisted_edwards::Projective as ArkProjective;
+
+        // Validate the cross-check config (Z is a non-square, the B-derived
+        // constants are consistent). `check_parameters` debug-asserts internally.
+        <Elligator2Map<Bjj> as ArkMapToCurve<ArkProjective<Bjj>>>::check_parameters().unwrap();
+
+        let mut saw_gx1 = false;
+        let mut saw_gx2 = false;
+        for i in 0u64..256 {
+            let u = BackendBaseField::from(i);
+
+            // Track which Elligator2 branch is exercised (gx1 square vs not) to
+            // make sure both code paths are covered by the cross-check.
+            let den = BackendBaseField::ONE + ELLIGATOR2_Z * u.square();
+            let mont_a = <EdwardsConfig as MontCurveConfig>::COEFF_A;
+            let x1 = -mont_a
+                / if den.is_zero() {
+                    BackendBaseField::ONE
+                } else {
+                    den
+                };
+            let gx1 = x1.square() * x1 + mont_a * x1.square() + x1;
+            if gx1.legendre().is_qr() {
+                saw_gx1 = true;
+            } else {
+                saw_gx2 = true;
+            }
+
+            let reference =
+                <Elligator2Map<Bjj> as ArkMapToCurve<ArkProjective<Bjj>>>::map_to_curve(u).unwrap();
+            let ours = FieldElement(u).map_to_curve();
+            assert!(ours.is_on_curve(), "mapped point off-curve at u={i}");
+            let ours_aff = ours.to_affine();
+            assert_eq!(ours_aff.x, reference.x, "x mismatch at u={i}");
+            assert_eq!(ours_aff.y, reference.y, "y mismatch at u={i}");
+        }
+        assert!(
+            saw_gx1 && saw_gx2,
+            "both Elligator2 branches should be tested"
+        );
+    }
+
+    /// The map produces on-curve points that may be outside the prime-order
+    /// subgroup; clearing the cofactor must always land back inside it.
+    #[test]
+    fn test_map_then_clear_cofactor_in_subgroup() {
+        use group::cofactor::CofactorGroup;
+
+        let mut saw_torsion = false;
+        for i in 0u64..64 {
+            let p = FieldElement(BackendBaseField::from(i)).map_to_curve();
+            assert!(p.is_on_curve(), "mapped point must be on-curve (u={i})");
+            if !bool::from(p.is_torsion_free()) {
+                saw_torsion = true;
+            }
+            assert!(
+                p.clear_cofactor().is_in_prime_order_subgroup(),
+                "clear_cofactor must produce a subgroup point (u={i})"
+            );
+        }
+        assert!(
+            saw_torsion,
+            "expected some mapped points outside the prime-order subgroup"
+        );
+    }
+
+    /// End-to-end `hash_from_bytes`: the result is a deterministic, on-curve,
+    /// prime-order-subgroup point, and distinct messages give distinct points.
+    #[test]
+    fn test_hash_from_bytes_properties() {
+        use elliptic_curve::hash2curve::ExpandMsgXmd;
+        use group::cofactor::CofactorGroup;
+
+        let dst: &[u8] = b"BabyJubJub_XMD:SHA-256_ELL2_RO_";
+        let m: &[u8] = b"abc";
+
+        let p = BabyJubJub::hash_from_bytes::<ExpandMsgXmd<sha2::Sha256>>(&[m], &[dst]).unwrap();
+        assert!(p.is_on_curve(), "hash output must be on-curve");
+        assert!(
+            p.is_in_prime_order_subgroup(),
+            "hash output must be in subgroup"
+        );
+        assert!(bool::from(p.is_torsion_free()));
+
+        // Determinism.
+        let p_again =
+            BabyJubJub::hash_from_bytes::<ExpandMsgXmd<sha2::Sha256>>(&[m], &[dst]).unwrap();
+        assert_eq!(p, p_again, "hash_from_bytes must be deterministic");
+
+        // Distinct messages -> (almost surely) distinct points.
+        let q_msg: &[u8] = b"abd";
+        let q =
+            BabyJubJub::hash_from_bytes::<ExpandMsgXmd<sha2::Sha256>>(&[q_msg], &[dst]).unwrap();
+        assert_ne!(p, q, "different messages should map to different points");
+    }
+
+    /// `encode_from_bytes` (single field element) also lands in the subgroup.
+    #[test]
+    fn test_encode_from_bytes_in_subgroup() {
+        use elliptic_curve::hash2curve::ExpandMsgXmd;
+
+        let dst: &[u8] = b"BabyJubJub_XMD:SHA-256_ELL2_NU_";
+        let m: &[u8] = b"encode me";
+        let p = BabyJubJub::encode_from_bytes::<ExpandMsgXmd<sha2::Sha256>>(&[m], &[dst]).unwrap();
+        assert!(p.is_on_curve());
+        assert!(p.is_in_prime_order_subgroup());
+    }
+
+    /// `hash_to_scalar` is deterministic and domain-separated.
+    #[test]
+    fn test_hash_to_scalar() {
+        use elliptic_curve::hash2curve::ExpandMsgXmd;
+
+        let m: &[u8] = b"hello world";
+        let dst: &[u8] = b"BabyJubJub_XMD:SHA-256_RO_scalar";
+        let s = BabyJubJub::hash_to_scalar::<ExpandMsgXmd<sha2::Sha256>>(&[m], &[dst]).unwrap();
+        let s_again =
+            BabyJubJub::hash_to_scalar::<ExpandMsgXmd<sha2::Sha256>>(&[m], &[dst]).unwrap();
+        assert_eq!(s, s_again, "hash_to_scalar must be deterministic");
+
+        let dst2: &[u8] = b"BabyJubJub_XMD:SHA-256_RO_other_";
+        let s_other =
+            BabyJubJub::hash_to_scalar::<ExpandMsgXmd<sha2::Sha256>>(&[m], &[dst2]).unwrap();
+        assert_ne!(s, s_other, "different DSTs should give different scalars");
+    }
+
+    // A standalone arkworks curve config mirroring BabyJubJub plus the
+    // `Elligator2Config` constants. It exists only to obtain a reference
+    // `Elligator2Map` to cross-check our hand-rolled map against; every curve
+    // constant is sourced from the backend's `EdwardsConfig`, and `Z` is our
+    // `ELLIGATOR2_Z` (independently checked by `test_elligator2_z_is_canonical`).
+    #[derive(Clone, Default, PartialEq, Eq)]
+    struct Bjj;
+
+    impl ark_ec::CurveConfig for Bjj {
+        type BaseField = BackendBaseField;
+        type ScalarField = BackendScalar;
+        const COFACTOR: &'static [u64] = <EdwardsConfig as ark_ec::CurveConfig>::COFACTOR;
+        const COFACTOR_INV: BackendScalar = <EdwardsConfig as ark_ec::CurveConfig>::COFACTOR_INV;
+    }
+
+    impl ark_ec::twisted_edwards::TECurveConfig for Bjj {
+        const COEFF_A: BackendBaseField =
+            <EdwardsConfig as ark_ec::twisted_edwards::TECurveConfig>::COEFF_A;
+        const COEFF_D: BackendBaseField =
+            <EdwardsConfig as ark_ec::twisted_edwards::TECurveConfig>::COEFF_D;
+        const GENERATOR: ark_ec::twisted_edwards::Affine<Bjj> =
+            ark_ec::twisted_edwards::Affine::new_unchecked(
+                taceo_ark_babyjubjub::GENERATOR_X,
+                taceo_ark_babyjubjub::GENERATOR_Y,
+            );
+        type MontCurveConfig = Bjj;
+    }
+
+    impl ark_ec::twisted_edwards::MontCurveConfig for Bjj {
+        const COEFF_A: BackendBaseField = <EdwardsConfig as MontCurveConfig>::COEFF_A;
+        const COEFF_B: BackendBaseField = <EdwardsConfig as MontCurveConfig>::COEFF_B;
+        type TECurveConfig = Bjj;
+    }
+
+    impl ark_ec::hashing::curve_maps::elligator2::Elligator2Config for Bjj {
+        const Z: BackendBaseField = ELLIGATOR2_Z;
+        const ONE_OVER_COEFF_B_SQUARE: BackendBaseField = BackendBaseField::ONE;
+        const COEFF_A_OVER_COEFF_B: BackendBaseField = <EdwardsConfig as MontCurveConfig>::COEFF_A;
     }
 }

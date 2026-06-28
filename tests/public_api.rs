@@ -886,6 +886,44 @@ fn test_projective_point_implements_cofactor_group() {
     assert!(g.clear_cofactor().is_in_prime_order_subgroup());
 }
 
+// ==================== GroupDigest (hash-to-curve) Tests ====================
+
+#[test]
+fn test_babyjubjub_implements_group_digest() {
+    use babyjubjub_ec::elliptic_curve::hash2curve::{ExpandMsgXmd, GroupDigest};
+    use babyjubjub_ec::group::cofactor::CofactorGroup;
+    use sha2::Sha256;
+
+    // Compile-time check that BabyJubJub satisfies the GroupDigest bound (its
+    // `ProjectivePoint: CofactorGroup` where-clause included).
+    fn assert_group_digest<C>()
+    where
+        C: GroupDigest,
+        babyjubjub_ec::elliptic_curve::ProjectivePoint<C>: CofactorGroup,
+    {
+    }
+    assert_group_digest::<BabyJubJub>();
+
+    // The `FieldElement` associated type is part of the public API.
+    let _: babyjubjub_ec::FieldElement = babyjubjub_ec::FieldElement::default();
+
+    // Functional check through the public trait surface: `hash_from_bytes`
+    // produces a deterministic, on-curve, prime-order-subgroup point.
+    let dst: &[u8] = b"BabyJubJub_XMD:SHA-256_ELL2_RO_";
+    let msg: &[u8] = b"public api hash-to-curve";
+    let p = BabyJubJub::hash_from_bytes::<ExpandMsgXmd<Sha256>>(&[msg], &[dst]).unwrap();
+    assert!(p.is_on_curve());
+    assert!(p.is_in_prime_order_subgroup());
+    assert!(bool::from(p.is_torsion_free()));
+    let p_again = BabyJubJub::hash_from_bytes::<ExpandMsgXmd<Sha256>>(&[msg], &[dst]).unwrap();
+    assert_eq!(p, p_again);
+
+    // `hash_to_scalar` is available because `Scalar: FromOkm`.
+    let s = BabyJubJub::hash_to_scalar::<ExpandMsgXmd<Sha256>>(&[msg], &[dst]).unwrap();
+    let s_again = BabyJubJub::hash_to_scalar::<ExpandMsgXmd<Sha256>>(&[msg], &[dst]).unwrap();
+    assert_eq!(s, s_again);
+}
+
 // ==================== CurveArithmetic Tests ====================
 
 #[test]
