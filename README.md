@@ -23,10 +23,11 @@ zero-knowledge proofs like zk-SNARKs and ZK-Rollups.
 
 - `std` (default): enables standard-library support for this wrapper and the
   arkworks crates it uses directly.
-- `zeroize` (**off** by default): implements `zeroize::DefaultIsZeroes` for `Scalar`,
-  `AffinePoint`, and `ProjectivePoint`, enabling an explicit `.zeroize()` on those
-  types. It is disabled by default so the crate does not pull in the `zeroize`
-  dependency unless you ask for it.
+- `zeroize` (**off** by default): retained for backwards compatibility, but now a
+  no-op. `zeroize::DefaultIsZeroes` (and hence an explicit `.zeroize()`) is
+  implemented for `Scalar`, `AffinePoint`, and `ProjectivePoint`
+  **unconditionally** via `elliptic-curve`'s re-exported `zeroize`, which
+  `CurveArithmetic` requires — so it no longer depends on this feature.
 - Disabling default features builds `no_std`. Note that the arkworks backend still
   requires a global allocator (`alloc`), so this targets `no_std + alloc`
   environments rather than bare-metal `no_std` without an allocator.
@@ -119,7 +120,7 @@ let decoded = ProjectivePoint::from_bytes(&bytes);
 
 | Type | Description |
 |------|-------------|
-| `BabyJubJub` | Curve type implementing `Curve` and `PrimeCurve` |
+| `BabyJubJub` | Curve type implementing `Curve`, `PrimeCurve`, and `CurveArithmetic` |
 | `AffinePoint` | Affine point representation (x, y coordinates) |
 | `ProjectivePoint` | Projective point representation (x, y, z coordinates) |
 | `Scalar` | Scalar field element |
@@ -127,13 +128,29 @@ let decoded = ProjectivePoint::from_bytes(&bytes);
 
 ### Traits Implemented
 
+- `elliptic_curve::Curve` and `elliptic_curve::PrimeCurve` for `BabyJubJub`
+- `elliptic_curve::CurveArithmetic` for `BabyJubJub`, with `AffinePoint`,
+  `ProjectivePoint`, and `Scalar` as its associated types. This requires (and the
+  crate provides) the full set of helper-trait impls, including:
+  - `elliptic_curve::CurveGroup` (`group::Curve`) and `BatchNormalize` for
+    `ProjectivePoint`
+  - `elliptic_curve::CurveAffine` and `elliptic_curve::point::AffineCoordinates`
+    for `AffinePoint`
+  - `elliptic_curve::ops::{Invert, Reduce, MulVartime, MulByGeneratorVartime,
+    LinearCombination}`, `elliptic_curve::scalar::{FromUintUnchecked, IsHigh}`,
+    and `bigint::modular::Retrieve` for `Scalar`
+  - conversions to/from `U256`, `ScalarValue`, `FieldBytes`, `NonZeroScalar`, and
+    `NonIdentity`, plus `Scalar * Point` multiplication in both operand orders
 - `group::Group` for `ProjectivePoint`
 - `group::ff::Field` for `Scalar`
-- `group::ff::PrimeField` for `Scalar`
-- `group::GroupEncoding` for `ProjectivePoint`
-- `subtle::ConditionallySelectable` for `ProjectivePoint`, `AffinePoint`, `Scalar`
-- `zeroize::DefaultIsZeroes` for all point and scalar types (only when the
-  `zeroize` feature is enabled; it is off by default)
+- `group::ff::PrimeField` for `Scalar`. **Note:** `PrimeField::Repr` is now
+  `elliptic_curve::FieldBytes<BabyJubJub>` (i.e. `Array<u8, U32>`) rather than
+  `[u8; 32]`, as `CurveArithmetic` mandates. If you have a `[u8; 32]`, pass
+  `bytes.into()` to `from_repr` / `from_repr_vartime`.
+- `group::GroupEncoding` for `ProjectivePoint` and `AffinePoint`
+- `subtle::ConditionallySelectable` and `subtle::ConstantTimeEq` for
+  `ProjectivePoint`, `AffinePoint`, `Scalar`
+- `zeroize::DefaultIsZeroes` for all point and scalar types (**unconditional**)
 
 ## Examples
 
@@ -149,7 +166,8 @@ See the [tests](src/lib.rs) for more examples including:
 
 ```bash
 cargo test
-cargo test --features std
+cargo test --all-features
+cargo check --no-default-features
 ```
 
 ## Benchmarking
@@ -190,8 +208,8 @@ This crate is a thin wrapper over the arkworks backend. Please note:
   preventing scalar/point malleability. Use `Scalar::reduce_bytes_be` when
   modular reduction is explicitly desired.
 - **Zeroization.** `Scalar` is `Copy`, so it cannot auto-zeroize on drop; wipe
-  secret storage yourself. Enabling the `zeroize` feature (off by default) makes
-  the point and scalar types implement `Zeroize` via `DefaultIsZeroes`.
+  secret storage yourself. The point and scalar types implement `Zeroize` via
+  `DefaultIsZeroes` **unconditionally** (required by `CurveArithmetic`).
 
 ## License
 

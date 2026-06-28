@@ -16,7 +16,7 @@ ark-ec = { version = "0.5", default-features = false }
 ark-ff = { version = "0.5", default-features = false }
 ark-serialize = { version = "0.5", default-features = false }
 # elliptic-curve traits
-elliptic-curve = { version = "0.14.0", default-features = false }
+elliptic-curve = { version = "0.14.0", default-features = false, features = ["arithmetic"] }
 # Scalar field operations
 ff = { version = "0.14", default-features = false }
 # group crate for core group traits

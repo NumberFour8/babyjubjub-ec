@@ -791,7 +791,7 @@ fn test_prime_field_repr_round_trip() {
         assert_eq!(back.unwrap(), s);
     }
     // from_repr rejects a non-canonical (>= r) encoding.
-    assert!(bool::from(Scalar::from_repr([0xFFu8; 32]).is_none()));
+    assert!(bool::from(Scalar::from_repr([0xFFu8; 32].into()).is_none()));
 }
 
 // ==================== Assign-Operator Tests ====================
@@ -859,4 +859,256 @@ fn test_babyjubjub_implements_prime_curve() {
     fn assert_prime_curve<C: elliptic_curve::PrimeCurve>() {}
     assert_prime_curve::<BabyJubJub>();
     let _ = <BabyJubJub as elliptic_curve::Curve>::ORDER;
+}
+
+// ==================== CurveArithmetic Tests ====================
+
+#[test]
+fn test_babyjubjub_implements_curve_arithmetic() {
+    // Compile-time check that BabyJubJub satisfies the full CurveArithmetic bound.
+    fn assert_curve_arithmetic<C: elliptic_curve::CurveArithmetic>() {}
+    assert_curve_arithmetic::<BabyJubJub>();
+
+    // The associated types are exactly the crate's wrapper types (this only
+    // type-checks if they are identical).
+    let _scalar: <BabyJubJub as elliptic_curve::CurveArithmetic>::Scalar = Scalar::ONE;
+    let _affine: <BabyJubJub as elliptic_curve::CurveArithmetic>::AffinePoint =
+        AffinePoint::GENERATOR;
+    let _projective: <BabyJubJub as elliptic_curve::CurveArithmetic>::ProjectivePoint =
+        ProjectivePoint::GENERATOR;
+}
+
+#[test]
+fn test_scalar_u256_round_trip() {
+    use elliptic_curve::bigint::U256;
+    use elliptic_curve::bigint::modular::Retrieve;
+    use elliptic_curve::scalar::FromUintUnchecked;
+
+    for s in [
+        Scalar::ZERO,
+        Scalar::ONE,
+        Scalar::from(42u64),
+        Scalar::ZERO - Scalar::ONE, // r - 1, the largest canonical scalar
+    ] {
+        let u: U256 = s.into();
+        // `retrieve` agrees with the `Into<U256>` conversion.
+        assert_eq!(s.retrieve(), u);
+        // `from_uint_unchecked` round-trips canonical (< r) integers.
+        assert_eq!(Scalar::from_uint_unchecked(u), s);
+    }
+}
+
+#[test]
+fn test_scalar_scalarvalue_round_trip() {
+    use elliptic_curve::ScalarValue;
+
+    for s in [Scalar::ZERO, Scalar::ONE, Scalar::from(123u64)] {
+        let sv: ScalarValue<BabyJubJub> = s.into();
+        let back: Scalar = sv.into();
+        assert_eq!(back, s);
+    }
+}
+
+#[test]
+fn test_scalar_fieldbytes_round_trip() {
+    use elliptic_curve::FieldBytes;
+
+    for s in [
+        Scalar::ZERO,
+        Scalar::ONE,
+        Scalar::from(99u64),
+        Scalar::ZERO - Scalar::ONE,
+    ] {
+        let fb: FieldBytes<BabyJubJub> = s.into();
+        // `Into<FieldBytes>` matches `PrimeField::to_repr`.
+        assert_eq!(fb, s.to_repr());
+        assert_eq!(Scalar::from_repr(fb).unwrap(), s);
+    }
+}
+
+#[test]
+fn test_nonzero_scalar_conversions() {
+    use elliptic_curve::NonZeroScalar;
+
+    // Zero is rejected, both via `new` and `TryFrom` (with `elliptic_curve::Error`).
+    assert!(bool::from(
+        NonZeroScalar::<BabyJubJub>::new(Scalar::ZERO).is_none()
+    ));
+    assert!(NonZeroScalar::<BabyJubJub>::try_from(Scalar::ZERO).is_err());
+
+    // A non-zero scalar is accepted and round-trips losslessly.
+    let s = Scalar::from(7u64);
+    let nz = NonZeroScalar::<BabyJubJub>::try_from(s).expect("non-zero scalar");
+    let back: Scalar = nz.into();
+    assert_eq!(back, s);
+}
+
+#[test]
+fn test_scalar_reduce_u256_and_fieldbytes() {
+    use elliptic_curve::FieldBytes;
+    use elliptic_curve::bigint::U256;
+    use elliptic_curve::ops::Reduce;
+
+    // Values < r are returned unchanged.
+    assert_eq!(
+        <Scalar as Reduce<U256>>::reduce(&U256::from(5u64)),
+        Scalar::from(5u64)
+    );
+
+    // A value >= r is reduced; the result is canonical, hence idempotent.
+    let reduced = <Scalar as Reduce<U256>>::reduce(&U256::MAX);
+    let reduced_u: U256 = reduced.into();
+    assert_eq!(<Scalar as Reduce<U256>>::reduce(&reduced_u), reduced);
+
+    // `Reduce<FieldBytes>` reduces a non-canonical little-endian encoding too.
+    let fb: FieldBytes<BabyJubJub> = [0xFFu8; 32].into();
+    let r1 = <Scalar as Reduce<FieldBytes<BabyJubJub>>>::reduce(&fb);
+    let r1_bytes: FieldBytes<BabyJubJub> = r1.into();
+    assert_eq!(
+        <Scalar as Reduce<FieldBytes<BabyJubJub>>>::reduce(&r1_bytes),
+        r1
+    );
+}
+
+#[test]
+fn test_scalar_is_high() {
+    use elliptic_curve::scalar::IsHigh;
+
+    assert!(!bool::from(Scalar::ZERO.is_high()));
+    assert!(!bool::from(Scalar::ONE.is_high()));
+    // r - 1 is the largest scalar and is unambiguously in the upper half.
+    assert!(bool::from((Scalar::ZERO - Scalar::ONE).is_high()));
+}
+
+#[test]
+fn test_scalar_times_point_equals_point_times_scalar() {
+    let s = Scalar::from(123_456_789u64);
+    let g = ProjectivePoint::GENERATOR;
+    let expected = g * s;
+
+    // Scalar * ProjectivePoint, in every operand/reference combination.
+    assert_eq!(s * g, expected);
+    assert_eq!(&s * g, expected);
+    assert_eq!(s * &g, expected);
+    assert_eq!(&s * &g, expected);
+
+    // Scalar * AffinePoint matches, in both operand orders.
+    let ga = AffinePoint::GENERATOR;
+    assert_eq!(s * ga, expected);
+    assert_eq!(ga * s, expected);
+}
+
+#[test]
+fn test_mul_vartime_and_mul_by_generator_vartime() {
+    use elliptic_curve::ops::{MulByGeneratorVartime, MulVartime};
+
+    let s = Scalar::from(98_765u64);
+    let g = ProjectivePoint::GENERATOR;
+    let expected = g * s;
+
+    // Variable-time multiplication agrees with the constant-time result.
+    assert_eq!(g.mul_vartime(s), expected);
+    assert_eq!(g.mul_vartime(&s), expected);
+    assert_eq!(s.mul_vartime(g), expected);
+    assert_eq!(AffinePoint::GENERATOR.mul_vartime(s), expected);
+
+    // mul_by_generator_vartime(s) == G * s.
+    assert_eq!(ProjectivePoint::mul_by_generator_vartime(&s), expected);
+}
+
+#[test]
+fn test_linear_combination_two_terms() {
+    use elliptic_curve::ops::LinearCombination;
+
+    let g = ProjectivePoint::GENERATOR;
+    let q = g + g; // 2G
+    let a = Scalar::from(3u64);
+    let b = Scalar::from(5u64);
+
+    let pairs = [(g, a), (q, b)];
+    let combined = ProjectivePoint::lincomb(&pairs);
+    assert_eq!(combined, g * a + q * b);
+}
+
+#[test]
+fn test_curve_group_to_affine_and_batch_normalize() {
+    use elliptic_curve::{BatchNormalize, CurveAffine, CurveGroup};
+
+    let g = ProjectivePoint::GENERATOR;
+    let p = g + g; // z != 1
+
+    // CurveGroup::to_affine matches the inherent to_affine.
+    assert_eq!(CurveGroup::to_affine(&p), p.to_affine());
+
+    // BatchNormalize of an array equals per-element normalization.
+    let arr = [g, p, g + p];
+    let normalized =
+        <ProjectivePoint as BatchNormalize<[ProjectivePoint; 3]>>::batch_normalize(&arr);
+    for (point, affine) in arr.iter().zip(normalized.iter()) {
+        assert_eq!(*affine, point.to_affine());
+    }
+
+    // CurveAffine::to_curve round-trips with to_affine.
+    let affine = p.to_affine();
+    assert_eq!(CurveAffine::to_curve(&affine), p);
+
+    // CurveAffine identity / generator accessors.
+    assert!(bool::from(CurveAffine::is_identity(&AffinePoint::IDENTITY)));
+    assert!(!bool::from(CurveAffine::is_identity(
+        &AffinePoint::GENERATOR
+    )));
+    assert_eq!(
+        <AffinePoint as CurveAffine>::generator(),
+        AffinePoint::GENERATOR
+    );
+}
+
+#[test]
+fn test_affine_coordinates() {
+    use elliptic_curve::FieldBytes;
+    use elliptic_curve::point::AffineCoordinates;
+
+    let g = AffinePoint::GENERATOR;
+    // Call the trait methods explicitly: the inherent `x`/`y` return field
+    // elements (not `FieldBytes`) and would otherwise shadow the trait methods.
+    let gx = AffineCoordinates::x(&g);
+    let gy = AffineCoordinates::y(&g);
+    let rebuilt = AffinePoint::from_coordinates(&gx, &gy);
+    assert!(bool::from(rebuilt.is_some()));
+    assert_eq!(rebuilt.unwrap(), g);
+
+    // (0, 0) is not on the curve and must be rejected.
+    let zero = FieldBytes::<BabyJubJub>::default();
+    assert!(bool::from(
+        AffinePoint::from_coordinates(&zero, &zero).is_none()
+    ));
+}
+
+#[test]
+fn test_nonidentity_conversions() {
+    use elliptic_curve::point::NonIdentity;
+
+    // The identity is rejected for both point types.
+    assert!(NonIdentity::<ProjectivePoint>::try_from(ProjectivePoint::IDENTITY).is_err());
+    assert!(NonIdentity::<AffinePoint>::try_from(AffinePoint::IDENTITY).is_err());
+
+    // A non-identity projective point is accepted and round-trips.
+    let g = ProjectivePoint::GENERATOR;
+    let nz = NonIdentity::<ProjectivePoint>::try_from(g).expect("generator is non-identity");
+    let back: ProjectivePoint = nz.into();
+    assert_eq!(back, g);
+
+    // Same for affine.
+    let ga = AffinePoint::GENERATOR;
+    let nza = NonIdentity::<AffinePoint>::try_from(ga).expect("generator is non-identity");
+    let backa: AffinePoint = nza.into();
+    assert_eq!(backa, ga);
+}
+
+#[test]
+fn test_affine_point_default_is_identity() {
+    // `Default` for both point types is now the group identity (required so the
+    // generic `NonIdentity` machinery treats it as the identity sentinel).
+    assert_eq!(AffinePoint::default(), AffinePoint::IDENTITY);
+    assert_eq!(ProjectivePoint::default(), ProjectivePoint::IDENTITY);
 }
