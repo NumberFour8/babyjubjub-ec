@@ -899,11 +899,11 @@ fn test_scalar_u256_round_trip() {
 }
 
 #[test]
-fn test_scalar_scalarvalue_round_trip() {
-    use elliptic_curve::ScalarValue;
+fn test_scalar_scalarprimitive_round_trip() {
+    use elliptic_curve::ScalarPrimitive;
 
     for s in [Scalar::ZERO, Scalar::ONE, Scalar::from(123u64)] {
-        let sv: ScalarValue<BabyJubJub> = s.into();
+        let sv: ScalarPrimitive<BabyJubJub> = s.into();
         let back: Scalar = sv.into();
         assert_eq!(back, s);
     }
@@ -951,23 +951,20 @@ fn test_scalar_reduce_u256_and_fieldbytes() {
 
     // Values < r are returned unchanged.
     assert_eq!(
-        <Scalar as Reduce<U256>>::reduce(&U256::from(5u64)),
+        <Scalar as Reduce<U256>>::reduce(U256::from(5u64)),
         Scalar::from(5u64)
     );
 
     // A value >= r is reduced; the result is canonical, hence idempotent.
-    let reduced = <Scalar as Reduce<U256>>::reduce(&U256::MAX);
+    let reduced = <Scalar as Reduce<U256>>::reduce(U256::MAX);
     let reduced_u: U256 = reduced.into();
-    assert_eq!(<Scalar as Reduce<U256>>::reduce(&reduced_u), reduced);
+    assert_eq!(<Scalar as Reduce<U256>>::reduce(reduced_u), reduced);
 
-    // `Reduce<FieldBytes>` reduces a non-canonical little-endian encoding too.
+    // `reduce_bytes` reduces a non-canonical little-endian encoding too.
     let fb: FieldBytes<BabyJubJub> = [0xFFu8; 32].into();
-    let r1 = <Scalar as Reduce<FieldBytes<BabyJubJub>>>::reduce(&fb);
+    let r1 = <Scalar as Reduce<U256>>::reduce_bytes(&fb);
     let r1_bytes: FieldBytes<BabyJubJub> = r1.into();
-    assert_eq!(
-        <Scalar as Reduce<FieldBytes<BabyJubJub>>>::reduce(&r1_bytes),
-        r1
-    );
+    assert_eq!(<Scalar as Reduce<U256>>::reduce_bytes(&r1_bytes), r1);
 }
 
 #[test]
@@ -981,6 +978,28 @@ fn test_scalar_is_high() {
 }
 
 #[test]
+fn test_scalar_shr_assign() {
+    // `ShrAssign<usize>` is required by the 0.13.8 `CurveArithmetic::Scalar`
+    // bound: a right shift is floor-division of the canonical integer value by
+    // `2^n`.
+    let mut s = Scalar::from(180u64);
+    s >>= 2usize;
+    assert_eq!(s, Scalar::from(45u64)); // 180 / 4
+
+    // Shifting by 0 bits is a no-op.
+    let mut t = Scalar::from(12_345u64);
+    t >>= 0usize;
+    assert_eq!(t, Scalar::from(12_345u64));
+
+    // Property: for an even value 2k, (2k) >> 1 == k.
+    let k = Scalar::from(7u64);
+    let mut two_k = k + k;
+    two_k >>= 1usize;
+    assert_eq!(two_k, k);
+}
+
+#[test]
+#[allow(clippy::op_ref)] // the point of this test is to exercise the reference operator impls
 fn test_scalar_times_point_equals_point_times_scalar() {
     let s = Scalar::from(123_456_789u64);
     let g = ProjectivePoint::GENERATOR;
@@ -999,24 +1018,6 @@ fn test_scalar_times_point_equals_point_times_scalar() {
 }
 
 #[test]
-fn test_mul_vartime_and_mul_by_generator_vartime() {
-    use elliptic_curve::ops::{MulByGeneratorVartime, MulVartime};
-
-    let s = Scalar::from(98_765u64);
-    let g = ProjectivePoint::GENERATOR;
-    let expected = g * s;
-
-    // Variable-time multiplication agrees with the constant-time result.
-    assert_eq!(g.mul_vartime(s), expected);
-    assert_eq!(g.mul_vartime(&s), expected);
-    assert_eq!(s.mul_vartime(g), expected);
-    assert_eq!(AffinePoint::GENERATOR.mul_vartime(s), expected);
-
-    // mul_by_generator_vartime(s) == G * s.
-    assert_eq!(ProjectivePoint::mul_by_generator_vartime(&s), expected);
-}
-
-#[test]
 fn test_linear_combination_two_terms() {
     use elliptic_curve::ops::LinearCombination;
 
@@ -1025,20 +1026,24 @@ fn test_linear_combination_two_terms() {
     let a = Scalar::from(3u64);
     let b = Scalar::from(5u64);
 
-    let pairs = [(g, a), (q, b)];
-    let combined = ProjectivePoint::lincomb(&pairs);
+    // 0.13.8's `LinearCombination::lincomb` takes the two point/scalar pairs as
+    // separate arguments and computes `x * k + y * l`.
+    let combined = ProjectivePoint::lincomb(&g, &a, &q, &b);
     assert_eq!(combined, g * a + q * b);
 }
 
 #[test]
 fn test_curve_group_to_affine_and_batch_normalize() {
-    use elliptic_curve::{BatchNormalize, CurveAffine, CurveGroup};
+    use elliptic_curve::BatchNormalize;
 
     let g = ProjectivePoint::GENERATOR;
     let p = g + g; // z != 1
 
-    // CurveGroup::to_affine matches the inherent to_affine.
-    assert_eq!(CurveGroup::to_affine(&p), p.to_affine());
+    // `group::Curve::to_affine` matches the inherent to_affine.
+    assert_eq!(
+        <ProjectivePoint as elliptic_curve::group::Curve>::to_affine(&p),
+        p.to_affine()
+    );
 
     // BatchNormalize of an array equals per-element normalization.
     let arr = [g, p, g + p];
@@ -1048,19 +1053,12 @@ fn test_curve_group_to_affine_and_batch_normalize() {
         assert_eq!(*affine, point.to_affine());
     }
 
-    // CurveAffine::to_curve round-trips with to_affine.
+    // 0.13.8 has no `CurveAffine`; identity / generator / to-curve are exposed
+    // via inherent methods, the `GENERATOR`/`IDENTITY` constants, and `From`.
     let affine = p.to_affine();
-    assert_eq!(CurveAffine::to_curve(&affine), p);
-
-    // CurveAffine identity / generator accessors.
-    assert!(bool::from(CurveAffine::is_identity(&AffinePoint::IDENTITY)));
-    assert!(!bool::from(CurveAffine::is_identity(
-        &AffinePoint::GENERATOR
-    )));
-    assert_eq!(
-        <AffinePoint as CurveAffine>::generator(),
-        AffinePoint::GENERATOR
-    );
+    assert_eq!(ProjectivePoint::from(affine), p);
+    assert!(AffinePoint::IDENTITY.is_identity());
+    assert!(!AffinePoint::GENERATOR.is_identity());
 }
 
 #[test]
@@ -1069,10 +1067,12 @@ fn test_affine_coordinates() {
     use elliptic_curve::point::AffineCoordinates;
 
     let g = AffinePoint::GENERATOR;
-    // Call the trait methods explicitly: the inherent `x`/`y` return field
-    // elements (not `FieldBytes`) and would otherwise shadow the trait methods.
+    // `AffineCoordinates::x` returns the x-coordinate as `FieldBytes`; 0.13.8's
+    // trait has no `y`, so the inherent `coordinates` getter supplies both
+    // coordinates as `FieldBytes` (the inherent `x`/`y` return field elements).
     let gx = AffineCoordinates::x(&g);
-    let gy = AffineCoordinates::y(&g);
+    let (gx2, gy) = g.coordinates();
+    assert_eq!(gx, gx2);
     let rebuilt = AffinePoint::from_coordinates(&gx, &gy);
     assert!(bool::from(rebuilt.is_some()));
     assert_eq!(rebuilt.unwrap(), g);

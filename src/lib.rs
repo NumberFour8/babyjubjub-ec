@@ -6,6 +6,19 @@
 //! BabyJubJub is a cofactor-8 twisted Edwards curve defined over the 254-bit prime
 //! field `Fq`; its prime-order subgroup has a 251-bit scalar field `Fr` ([`Scalar`]).
 //!
+//! # `elliptic-curve` 0.13 line
+//!
+//! This is the `legacy-ec-13` release line (crate version `0.2.x`), built against
+//! the **`elliptic-curve` 0.13.8** ecosystem (`ff` 0.13 / `group` 0.13 /
+//! `rand_core` 0.6). It provides the same [`CurveArithmetic`] functionality as
+//! the `elliptic-curve` 0.14 line (crate `0.3.x`), re-expressed with 0.13.8
+//! conventions. APIs that exist only in 0.14 are unavailable here —
+//! `ctutils::{CtEq, CtSelect}`, `Generate`, `try_random`, `MulVartime`,
+//! `MulByGeneratorVartime`, `CurveAffine`, and the `ScalarValue` type — but their
+//! behaviour stays reachable via the 0.13.8-native equivalents
+//! (`subtle::{ConstantTimeEq, ConditionallySelectable}`, `Group`/`Field::random`,
+//! `MulByGenerator`, the inherent [`AffinePoint`] accessors, and `ScalarPrimitive`).
+//!
 //! # Security
 //!
 //! - **Side channels / constant-time.** Arithmetic is delegated to the arkworks
@@ -91,15 +104,12 @@ use subtle::{ConditionallySelectable, ConstantTimeEq, CtOption};
 // gate, so this is not tied to the optional local `zeroize` feature.
 use elliptic_curve::zeroize::DefaultIsZeroes;
 // ===== Imports for the `CurveArithmetic` associated-type bounds =====
+use core::ops::ShrAssign;
 use elliptic_curve::bigint::{ArrayEncoding, U256, modular::Retrieve};
-use elliptic_curve::ctutils;
-use elliptic_curve::ops::{Invert, LinearCombination, MulByGeneratorVartime, MulVartime, Reduce};
+use elliptic_curve::ops::{Invert, LinearCombination, MulByGenerator, Reduce};
 use elliptic_curve::point::{AffineCoordinates, NonIdentity};
 use elliptic_curve::scalar::{FromUintUnchecked, IsHigh};
-use elliptic_curve::{
-    BatchNormalize, CurveAffine, CurveGroup, Error as EcError, FieldBytes, Generate, ScalarValue,
-};
-use rand_core::TryCryptoRng;
+use elliptic_curve::{BatchNormalize, Error as EcError, FieldBytes, ScalarPrimitive};
 
 /// BabyJubJub curve type
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -130,9 +140,10 @@ impl Curve for BabyJubJub {
     type Uint = elliptic_curve::bigint::U256;
 
     /// Order of the BabyJubJub scalar field
-    const ORDER: elliptic_curve::bigint::Odd<Self::Uint> =
-        elliptic_curve::bigint::Odd::from_be_hex(ORDER_HEX);
+    const ORDER: Self::Uint = elliptic_curve::bigint::U256::from_be_hex(ORDER_HEX);
 }
+
+impl elliptic_curve::FieldBytesEncoding<BabyJubJub> for elliptic_curve::bigint::U256 {}
 
 // `BabyJubJub::ORDER` is the order `r` of the prime-order subgroup (the scalar
 // field order), which is prime. `PrimeCurve` is a marker trait asserting exactly
@@ -649,14 +660,9 @@ impl Scalar {
 impl Group for ProjectivePoint {
     type Scalar = Scalar;
 
-    fn random<R: rand_core::Rng + ?Sized>(rng: &mut R) -> Self {
-        let scalar = Scalar::random(rng);
+    fn random(mut rng: impl rand_core::RngCore) -> Self {
+        let scalar = Scalar::random(&mut rng);
         Self::generator() * scalar
-    }
-
-    fn try_random<R: rand_core::TryRng + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
-        let scalar = Scalar::try_random(rng)?;
-        Ok(Self::generator() * scalar)
     }
 
     fn generator() -> Self {
@@ -1252,12 +1258,8 @@ impl Field for Scalar {
         0x1f16424e1bb7724,
     ])));
 
-    fn random<R: rand_core::Rng + ?Sized>(rng: &mut R) -> Self {
-        Scalar::random(rng)
-    }
-
-    fn try_random<R: rand_core::TryRng + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
-        Scalar::try_random(rng)
+    fn random(mut rng: impl rand_core::RngCore) -> Self {
+        Scalar::random(&mut rng)
     }
 
     fn square(&self) -> Self {
@@ -1532,16 +1534,10 @@ impl ConstantTimeEq for ProjectivePoint {
 
 // Inherent methods for random scalar generation
 impl Scalar {
-    pub fn random<R: rand_core::Rng + ?Sized>(rng: &mut R) -> Self {
+    pub fn random(rng: &mut impl rand_core::RngCore) -> Self {
         let mut bytes = [0u8; 40];
         rng.fill_bytes(&mut bytes);
         Self(BackendScalar::from_le_bytes_mod_order(&bytes))
-    }
-
-    pub fn try_random<R: rand_core::TryRng + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
-        let mut bytes = [0u8; 40];
-        rng.try_fill_bytes(&mut bytes)?;
-        Ok(Self(BackendScalar::from_le_bytes_mod_order(&bytes)))
     }
 }
 
@@ -1581,10 +1577,63 @@ impl FromUintUnchecked for Scalar {
     }
 }
 
-// `From`/`TryFrom` web between `Scalar`, `NonZeroScalar`, `ScalarValue`, and
-// `SecretKey` (see `elliptic_curve::scalar_from_impls!`). Builds on the
-// `From<&Scalar> for U256` and `FromUintUnchecked` impls above.
-elliptic_curve::scalar_from_impls!(BabyJubJub, Scalar);
+// `From`/`TryFrom` web between `Scalar`, `NonZeroScalar`, `ScalarPrimitive`, and
+// `SecretKey`. Hand-written here because the `elliptic_curve::scalar_from_impls!`
+// macro does not exist in the 0.13.8 line. Builds on the `From<&Scalar> for U256`
+// and `FromUintUnchecked` impls above.
+impl From<elliptic_curve::NonZeroScalar<BabyJubJub>> for Scalar {
+    fn from(scalar: elliptic_curve::NonZeroScalar<BabyJubJub>) -> Self {
+        *scalar.as_ref()
+    }
+}
+
+impl From<&elliptic_curve::NonZeroScalar<BabyJubJub>> for Scalar {
+    fn from(scalar: &elliptic_curve::NonZeroScalar<BabyJubJub>) -> Self {
+        *scalar.as_ref()
+    }
+}
+
+impl From<ScalarPrimitive<BabyJubJub>> for Scalar {
+    fn from(w: ScalarPrimitive<BabyJubJub>) -> Self {
+        Scalar::from(&w)
+    }
+}
+
+impl From<&ScalarPrimitive<BabyJubJub>> for Scalar {
+    fn from(w: &ScalarPrimitive<BabyJubJub>) -> Scalar {
+        Scalar::from_uint_unchecked(*w.as_uint())
+    }
+}
+
+impl From<Scalar> for ScalarPrimitive<BabyJubJub> {
+    fn from(scalar: Scalar) -> ScalarPrimitive<BabyJubJub> {
+        ScalarPrimitive::from(&scalar)
+    }
+}
+
+impl From<&Scalar> for ScalarPrimitive<BabyJubJub> {
+    fn from(scalar: &Scalar) -> ScalarPrimitive<BabyJubJub> {
+        ScalarPrimitive::<BabyJubJub>::new(scalar.into()).unwrap()
+    }
+}
+
+impl From<&elliptic_curve::SecretKey<BabyJubJub>> for Scalar {
+    fn from(secret_key: &elliptic_curve::SecretKey<BabyJubJub>) -> Scalar {
+        *secret_key.to_nonzero_scalar()
+    }
+}
+
+/// The constant-time alternative is
+/// `elliptic_curve::NonZeroScalar::<BabyJubJub>::new()`.
+impl TryFrom<Scalar> for elliptic_curve::NonZeroScalar<BabyJubJub> {
+    type Error = EcError;
+
+    fn try_from(scalar: Scalar) -> core::result::Result<Self, EcError> {
+        elliptic_curve::NonZeroScalar::new(scalar)
+            .into_option()
+            .ok_or(EcError)
+    }
+}
 
 impl From<Scalar> for FieldBytes<BabyJubJub> {
     fn from(scalar: Scalar) -> Self {
@@ -1599,17 +1648,20 @@ impl From<&Scalar> for FieldBytes<BabyJubJub> {
 }
 
 impl Reduce<U256> for Scalar {
-    fn reduce(w: &U256) -> Self {
-        let bytes: [u8; 32] = w.to_le_byte_array().into();
+    type Bytes = FieldBytes<BabyJubJub>;
+
+    /// Reduce a `U256` modulo `r`, interpreting it through its little-endian
+    /// byte value to match the little-endian convention of
+    /// `PrimeField::{from_repr, to_repr}`.
+    fn reduce(n: U256) -> Self {
+        let bytes: [u8; 32] = n.to_le_byte_array().into();
         Scalar::reduce_bytes_le(&bytes)
     }
-}
 
-impl Reduce<FieldBytes<BabyJubJub>> for Scalar {
     /// Reduce a little-endian `FieldBytes` value modulo `r`, matching the
     /// little-endian convention of `PrimeField::{from_repr, to_repr}`.
-    fn reduce(w: &FieldBytes<BabyJubJub>) -> Self {
-        let bytes: [u8; 32] = (*w).into();
+    fn reduce_bytes(bytes: &FieldBytes<BabyJubJub>) -> Self {
+        let bytes: [u8; 32] = (*bytes).into();
         Scalar::reduce_bytes_le(&bytes)
     }
 }
@@ -1625,7 +1677,7 @@ impl Retrieve for Scalar {
 impl IsHigh for Scalar {
     /// `true` iff the canonical scalar is strictly greater than `r / 2`.
     fn is_high(&self) -> subtle::Choice {
-        ScalarValue::<BabyJubJub>::from(*self).is_high()
+        ScalarPrimitive::<BabyJubJub>::from(*self).is_high()
     }
 }
 
@@ -1634,14 +1686,6 @@ impl Invert for Scalar {
 
     fn invert(&self) -> CtOption<Scalar> {
         Scalar::invert(self)
-    }
-}
-
-impl Generate for Scalar {
-    fn try_generate_from_rng<R: TryCryptoRng + ?Sized>(
-        rng: &mut R,
-    ) -> core::result::Result<Self, R::Error> {
-        Scalar::try_random(rng)
     }
 }
 
@@ -1658,22 +1702,94 @@ impl PartialOrd for Scalar {
     }
 }
 
-impl ctutils::CtEq for Scalar {
-    fn ct_eq(&self, other: &Self) -> ctutils::Choice {
-        ConstantTimeEq::ct_eq(self, other).into()
-    }
-}
-
-impl ctutils::CtSelect for Scalar {
-    fn ct_select(&self, other: &Self, choice: ctutils::Choice) -> Self {
-        if choice.to_bool() { *other } else { *self }
+impl ShrAssign<usize> for Scalar {
+    /// Shift the canonical integer value right by `rhs` bits (floor division by
+    /// `2^rhs`), as required by the 0.13.8 `CurveArithmetic::Scalar` bound.
+    /// Shifting right never increases the value, so the result stays in
+    /// `[0, r)`.
+    fn shr_assign(&mut self, rhs: usize) {
+        let mut value = U256::from(*self);
+        value >>= rhs;
+        *self = Scalar::from_uint_unchecked(value);
     }
 }
 
 // Scalar-as-LHS multiplication over points (`Scalar * Point` in both operand
-// orders, plus the matching `MulVartime` impls). Delegates to the existing
-// point-by-scalar routines.
-elliptic_curve::scalar_mul_impls!(BabyJubJub, Scalar);
+// orders). Hand-written here because the `elliptic_curve::scalar_mul_impls!`
+// macro does not exist in the 0.13.8 line; the `MulVartime` variants the macro
+// also generated are omitted (no `MulVartime` trait in 0.13.8). Delegates to the
+// existing point-by-scalar routines.
+impl core::ops::Mul<AffinePoint> for Scalar {
+    type Output = ProjectivePoint;
+
+    #[inline]
+    fn mul(self, rhs: AffinePoint) -> ProjectivePoint {
+        rhs * self
+    }
+}
+
+impl core::ops::Mul<&AffinePoint> for Scalar {
+    type Output = ProjectivePoint;
+
+    #[inline]
+    fn mul(self, rhs: &AffinePoint) -> ProjectivePoint {
+        *rhs * self
+    }
+}
+
+impl core::ops::Mul<AffinePoint> for &Scalar {
+    type Output = ProjectivePoint;
+
+    #[inline]
+    fn mul(self, rhs: AffinePoint) -> ProjectivePoint {
+        rhs * self
+    }
+}
+
+impl core::ops::Mul<&AffinePoint> for &Scalar {
+    type Output = ProjectivePoint;
+
+    #[inline]
+    fn mul(self, rhs: &AffinePoint) -> ProjectivePoint {
+        *rhs * self
+    }
+}
+
+impl core::ops::Mul<ProjectivePoint> for Scalar {
+    type Output = ProjectivePoint;
+
+    #[inline]
+    fn mul(self, rhs: ProjectivePoint) -> ProjectivePoint {
+        rhs * self
+    }
+}
+
+impl core::ops::Mul<&ProjectivePoint> for Scalar {
+    type Output = ProjectivePoint;
+
+    #[inline]
+    fn mul(self, rhs: &ProjectivePoint) -> ProjectivePoint {
+        rhs * &self
+    }
+}
+
+impl core::ops::Mul<ProjectivePoint> for &Scalar {
+    type Output = ProjectivePoint;
+
+    #[inline]
+    fn mul(self, rhs: ProjectivePoint) -> ProjectivePoint {
+        rhs * self
+    }
+}
+
+impl core::ops::Mul<&ProjectivePoint> for &Scalar {
+    type Output = ProjectivePoint;
+
+    #[inline]
+    fn mul(self, rhs: &ProjectivePoint) -> ProjectivePoint {
+        rhs * self
+    }
+}
 
 // =====================================================================
 // `CurveArithmetic` support — points (`AffinePoint` / `ProjectivePoint`)
@@ -1718,11 +1834,31 @@ fn fq_to_field_bytes(value: &BackendBaseField) -> FieldBytes<BabyJubJub> {
 impl AffineCoordinates for AffinePoint {
     type FieldRepr = FieldBytes<BabyJubJub>;
 
+    fn x(&self) -> Self::FieldRepr {
+        fq_to_field_bytes(&self.x)
+    }
+
+    fn y_is_odd(&self) -> subtle::Choice {
+        subtle::Choice::from((self.y.into_bigint().0[0] & 1) as u8)
+    }
+}
+
+// 0.13.8's `AffineCoordinates` trait carries only `x()` + `y_is_odd()`. The
+// other 0.14 accessors are kept as inherent methods so the same functionality
+// stays reachable: `from_coordinates`, plus a `coordinates` getter that returns
+// both affine coordinates as little-endian `FieldRepr` bytes (the trait no
+// longer exposes `y`). `x_is_odd` already exists as an inherent method, and the
+// `x()` / `y()` field-element accessors (returning `BackendBaseField`) are
+// unchanged.
+impl AffinePoint {
     /// Build an affine point from little-endian coordinate bytes, returning
     /// `none` unless `(x, y)` is on the curve **and** in the prime-order
     /// subgroup. Out-of-range coordinate bytes are reduced modulo the
     /// base-field prime. This is **not** constant-time.
-    fn from_coordinates(x: &Self::FieldRepr, y: &Self::FieldRepr) -> CtOption<Self> {
+    pub fn from_coordinates(
+        x: &FieldBytes<BabyJubJub>,
+        y: &FieldBytes<BabyJubJub>,
+    ) -> CtOption<Self> {
         let xb: [u8; 32] = (*x).into();
         let yb: [u8; 32] = (*y).into();
         let xf = BackendBaseField::from_le_bytes_mod_order(&xb);
@@ -1733,20 +1869,11 @@ impl AffineCoordinates for AffinePoint {
         }
     }
 
-    fn x(&self) -> Self::FieldRepr {
-        fq_to_field_bytes(&self.x)
-    }
-
-    fn y(&self) -> Self::FieldRepr {
-        fq_to_field_bytes(&self.y)
-    }
-
-    fn x_is_odd(&self) -> subtle::Choice {
-        subtle::Choice::from((self.x.into_bigint().0[0] & 1) as u8)
-    }
-
-    fn y_is_odd(&self) -> subtle::Choice {
-        subtle::Choice::from((self.y.into_bigint().0[0] & 1) as u8)
+    /// The affine coordinates `(x, y)` as canonical little-endian field-element
+    /// bytes (`FieldRepr`). Companion to `from_coordinates`; the x-coordinate
+    /// alone is also available via the `AffineCoordinates::x` trait method.
+    pub fn coordinates(&self) -> (FieldBytes<BabyJubJub>, FieldBytes<BabyJubJub>) {
+        (fq_to_field_bytes(&self.x), fq_to_field_bytes(&self.y))
     }
 }
 
@@ -1777,18 +1904,6 @@ impl core::ops::Mul<&Scalar> for AffinePoint {
     }
 }
 
-impl MulVartime<Scalar> for AffinePoint {
-    fn mul_vartime(self, scalar: Scalar) -> ProjectivePoint {
-        self * scalar
-    }
-}
-
-impl MulVartime<&Scalar> for AffinePoint {
-    fn mul_vartime(self, scalar: &Scalar) -> ProjectivePoint {
-        self * scalar
-    }
-}
-
 impl GroupEncoding for AffinePoint {
     type Repr = GroupRepr;
 
@@ -1802,47 +1917,6 @@ impl GroupEncoding for AffinePoint {
 
     fn to_bytes(&self) -> Self::Repr {
         ProjectivePoint::from(*self).to_bytes()
-    }
-}
-
-impl CurveAffine for AffinePoint {
-    type Curve = ProjectivePoint;
-    type Scalar = Scalar;
-
-    fn identity() -> Self {
-        Self::IDENTITY
-    }
-
-    fn generator() -> Self {
-        Self::GENERATOR
-    }
-
-    fn is_identity(&self) -> subtle::Choice {
-        subtle::Choice::from(AffinePoint::is_identity(self) as u8)
-    }
-
-    fn to_curve(&self) -> ProjectivePoint {
-        ProjectivePoint::from(*self)
-    }
-}
-
-impl ctutils::CtEq for AffinePoint {
-    fn ct_eq(&self, other: &Self) -> ctutils::Choice {
-        ConstantTimeEq::ct_eq(self, other).into()
-    }
-}
-
-impl ctutils::CtSelect for AffinePoint {
-    fn ct_select(&self, other: &Self, choice: ctutils::Choice) -> Self {
-        if choice.to_bool() { *other } else { *self }
-    }
-}
-
-impl Generate for AffinePoint {
-    fn try_generate_from_rng<R: TryCryptoRng + ?Sized>(
-        rng: &mut R,
-    ) -> core::result::Result<Self, R::Error> {
-        Ok(<ProjectivePoint as Group>::try_random(rng)?.to_affine())
     }
 }
 
@@ -1920,8 +1994,8 @@ impl core::ops::SubAssign<&AffinePoint> for ProjectivePoint {
     }
 }
 
-impl CurveGroup for ProjectivePoint {
-    type Affine = AffinePoint;
+impl group::Curve for ProjectivePoint {
+    type AffineRepr = AffinePoint;
 
     fn to_affine(&self) -> AffinePoint {
         // Calls the inherent `to_affine` (inherent methods take precedence over
@@ -1938,42 +2012,9 @@ impl<const N: usize> BatchNormalize<[ProjectivePoint; N]> for ProjectivePoint {
     }
 }
 
-impl LinearCombination<[(ProjectivePoint, Scalar)]> for ProjectivePoint {}
-impl<const N: usize> LinearCombination<[(ProjectivePoint, Scalar); N]> for ProjectivePoint {}
+impl LinearCombination for ProjectivePoint {}
 
-impl MulByGeneratorVartime for ProjectivePoint {}
-
-impl MulVartime<Scalar> for ProjectivePoint {
-    fn mul_vartime(self, scalar: Scalar) -> ProjectivePoint {
-        self * scalar
-    }
-}
-
-impl MulVartime<&Scalar> for ProjectivePoint {
-    fn mul_vartime(self, scalar: &Scalar) -> ProjectivePoint {
-        self * scalar
-    }
-}
-
-impl ctutils::CtEq for ProjectivePoint {
-    fn ct_eq(&self, other: &Self) -> ctutils::Choice {
-        ConstantTimeEq::ct_eq(self, other).into()
-    }
-}
-
-impl ctutils::CtSelect for ProjectivePoint {
-    fn ct_select(&self, other: &Self, choice: ctutils::Choice) -> Self {
-        if choice.to_bool() { *other } else { *self }
-    }
-}
-
-impl Generate for ProjectivePoint {
-    fn try_generate_from_rng<R: TryCryptoRng + ?Sized>(
-        rng: &mut R,
-    ) -> core::result::Result<Self, R::Error> {
-        <ProjectivePoint as Group>::try_random(rng)
-    }
-}
+impl MulByGenerator for ProjectivePoint {}
 
 impl From<NonIdentity<ProjectivePoint>> for ProjectivePoint {
     fn from(point: NonIdentity<ProjectivePoint>) -> Self {
@@ -1995,6 +2036,8 @@ mod tests {
     use ark_ec::CurveConfig;
     // `to_bytes_be` / `num_bits` on the backend's `BigInt` come from this trait.
     use ark_ff::BigInteger;
+    // `to_be_bytes` on `BabyJubJub::ORDER` (a `U256`) comes from this trait.
+    use elliptic_curve::bigint::Encoding;
 
     /// Test that affine point operations match the backend implementation
     #[test]
@@ -2158,8 +2201,7 @@ mod tests {
         use elliptic_curve::Curve;
 
         // Get the order as bytes
-        let order_uint = BabyJubJub::ORDER.as_ref();
-        let order_bytes = order_uint.to_be_bytes();
+        let order_bytes = BabyJubJub::ORDER.to_be_bytes();
 
         // Convert to scalar (big-endian to little-endian)
         let mut order_le = [0u8; 32];
@@ -2214,8 +2256,7 @@ mod tests {
         use elliptic_curve::Curve;
 
         // Get the curve order (which is also the scalar field order)
-        let order_uint = BabyJubJub::ORDER.as_ref();
-        let order_bytes = order_uint.to_be_bytes();
+        let order_bytes = BabyJubJub::ORDER.to_be_bytes();
 
         // Convert to scalar (big-endian to little-endian)
         let mut order_le = [0u8; 32];
@@ -2631,8 +2672,7 @@ mod tests {
         // This ensures the hardcoded value is not outdated
 
         // Get the ORDER from BabyJubJub and convert to hex
-        let order = BabyJubJub::ORDER;
-        let order_bytes = order.as_ref().to_be_bytes();
+        let order_bytes = BabyJubJub::ORDER.to_be_bytes();
         // Convert bytes to hex string (big-endian)
         let order_hex = hex::encode(order_bytes);
 
@@ -3460,14 +3500,11 @@ mod tests {
     fn test_randomization() {
         use rand::{SeedableRng, rngs::StdRng};
         let mut rng = StdRng::seed_from_u64(42);
-        // Cover ProjectivePoint::try_random (631-634)
-        let _ = ProjectivePoint::try_random(&mut rng).unwrap();
+        // Cover ProjectivePoint::random
+        let _ = ProjectivePoint::random(&mut rng);
 
-        // Cover Scalar::random (1221-1223, 1500-1505)
+        // Cover Scalar::random
         let _ = <Scalar as Field>::random(&mut rng);
-
-        // Cover Scalar::try_random (1225-1227, 1507-1511)
-        let _ = <Scalar as Field>::try_random(&mut rng).unwrap();
     }
 
     #[test]

@@ -132,15 +132,16 @@ let decoded = ProjectivePoint::from_bytes(&bytes);
 - `elliptic_curve::CurveArithmetic` for `BabyJubJub`, with `AffinePoint`,
   `ProjectivePoint`, and `Scalar` as its associated types. This requires (and the
   crate provides) the full set of helper-trait impls, including:
-  - `elliptic_curve::CurveGroup` (`group::Curve`) and `BatchNormalize` for
-    `ProjectivePoint`
-  - `elliptic_curve::CurveAffine` and `elliptic_curve::point::AffineCoordinates`
-    for `AffinePoint`
-  - `elliptic_curve::ops::{Invert, Reduce, MulVartime, MulByGeneratorVartime,
-    LinearCombination}`, `elliptic_curve::scalar::{FromUintUnchecked, IsHigh}`,
+  - `group::Curve` and `BatchNormalize` for `ProjectivePoint`
+  - `elliptic_curve::point::AffineCoordinates` for `AffinePoint` (the identity /
+    generator / `to_curve` / `from_coordinates` constructors and the `y` /
+    `x_is_odd` getters are inherent methods, since `elliptic-curve` 0.13.8 has no
+    `CurveAffine`)
+  - `elliptic_curve::ops::{Invert, Reduce, MulByGenerator, LinearCombination}`,
+    `elliptic_curve::scalar::{FromUintUnchecked, IsHigh}`, `core::ops::ShrAssign`,
     and `bigint::modular::Retrieve` for `Scalar`
-  - conversions to/from `U256`, `ScalarValue`, `FieldBytes`, `NonZeroScalar`, and
-    `NonIdentity`, plus `Scalar * Point` multiplication in both operand orders
+  - conversions to/from `U256`, `ScalarPrimitive`, `FieldBytes`, `NonZeroScalar`,
+    and `NonIdentity`, plus `Scalar * Point` multiplication in both operand orders
 - `group::Group` for `ProjectivePoint`
 - `group::ff::Field` for `Scalar`
 - `group::ff::PrimeField` for `Scalar`. **Note:** `PrimeField::Repr` is now
@@ -151,6 +152,22 @@ let decoded = ProjectivePoint::from_bytes(&bytes);
 - `subtle::ConditionallySelectable` and `subtle::ConstantTimeEq` for
   `ProjectivePoint`, `AffinePoint`, `Scalar`
 - `zeroize::DefaultIsZeroes` for all point and scalar types (**unconditional**)
+
+### `elliptic-curve` 0.13 line
+
+This is the **`legacy-ec-13`** release line (crate version `0.2.x`), built against
+the **`elliptic-curve` 0.13.8** ecosystem (`ff` 0.13 / `group` 0.13 /
+`rand_core` 0.6). It provides the same `CurveArithmetic` functionality as the
+`elliptic-curve` 0.14 line (crate `0.3.x`), re-expressed with 0.13.8 conventions.
+APIs that exist only in 0.14 are therefore **not** available here; their
+behaviour stays reachable through the 0.13.8-native equivalents:
+
+- `ctutils::{CtEq, CtSelect}` → use `subtle::{ConstantTimeEq, ConditionallySelectable}`.
+- `Generate` / `try_random` → use `group::Group::random` / `ff::Field::random`.
+- `MulVartime` / `MulByGeneratorVartime` → use the constant-time `*` operator and
+  `MulByGenerator`.
+- `CurveAffine` → identity / generator / `to_curve` are inherent on `AffinePoint`.
+- the `ScalarValue` type → named `ScalarPrimitive` in 0.13.8.
 
 ## Examples
 
