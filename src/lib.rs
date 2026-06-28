@@ -501,6 +501,9 @@ impl Scalar {
     /// One scalar
     pub const ONE: Self = Self(BackendScalar::ONE);
 
+    /// Size of the scalar in bytes.
+    pub const SIZE: usize = 32;
+
     /// Create a scalar from a **canonical** big-endian byte encoding.
     ///
     /// # Security
@@ -511,7 +514,7 @@ impl Scalar {
     /// (e.g. `s` and `s + r`) would otherwise silently reduce to the same
     /// scalar. If you instead want modular reduction, use
     /// [`Scalar::reduce_bytes_be`].
-    pub fn from_bytes(bytes: &[u8; 32]) -> CtOption<Self> {
+    pub fn from_bytes(bytes: &[u8; Self::SIZE]) -> CtOption<Self> {
         let mut le = *bytes;
         le.reverse();
         Self::from_canonical_le(&le)
@@ -521,7 +524,7 @@ impl Scalar {
     ///
     /// See [`Scalar::from_bytes`] for the canonicity / security contract;
     /// returns `CtOption::none()` for any value `>= r`.
-    pub fn from_bytes_le(bytes: &[u8; 32]) -> CtOption<Self> {
+    pub fn from_bytes_le(bytes: &[u8; Self::SIZE]) -> CtOption<Self> {
         Self::from_canonical_le(bytes)
     }
 
@@ -531,7 +534,7 @@ impl Scalar {
     /// inputs `>= r` are reduced. Use only where modular reduction is the
     /// intended behaviour — never when decoding signatures or other values that
     /// must round-trip canonically.
-    pub fn reduce_bytes_be(bytes: &[u8; 32]) -> Self {
+    pub fn reduce_bytes_be(bytes: &[u8; Self::SIZE]) -> Self {
         let mut le = *bytes;
         le.reverse();
         Self(BackendScalar::from_le_bytes_mod_order(&le))
@@ -539,18 +542,18 @@ impl Scalar {
 
     /// Reduce an arbitrary little-endian 32-byte value modulo `r`.
     /// See [`Scalar::reduce_bytes_be`].
-    pub fn reduce_bytes_le(bytes: &[u8; 32]) -> Self {
+    pub fn reduce_bytes_le(bytes: &[u8; Self::SIZE]) -> Self {
         Self(BackendScalar::from_le_bytes_mod_order(bytes))
     }
 
     /// Build a scalar from canonical little-endian bytes, rejecting any value
     /// `>= r`. Backs [`Scalar::from_bytes`] / [`Scalar::from_bytes_le`].
-    fn from_canonical_le(bytes: &[u8; 32]) -> CtOption<Self> {
+    fn from_canonical_le(bytes: &[u8; Self::SIZE]) -> CtOption<Self> {
         let value = BackendScalar::from_le_bytes_mod_order(bytes);
         CtOption::new(Self(value), Self::is_canonical_le(bytes))
     }
 
-    fn is_canonical_le(bytes: &[u8; 32]) -> subtle::Choice {
+    fn is_canonical_le(bytes: &[u8; Self::SIZE]) -> subtle::Choice {
         let mut borrow = 0u16;
         for (&a, &b) in bytes.iter().zip(SCALAR_MODULUS_LE.iter()) {
             let diff = (a as u16).wrapping_sub(b as u16).wrapping_sub(borrow);
@@ -560,7 +563,7 @@ impl Scalar {
     }
 
     /// Convert to bytes (little-endian). Allocation-free.
-    pub fn to_bytes_le(&self) -> [u8; 32] {
+    pub fn to_bytes_le(&self) -> [u8; Self::SIZE] {
         let limbs = self.0.into_bigint().0;
         let mut arr = [0u8; 32];
         for (i, limb) in limbs.iter().enumerate() {
@@ -570,7 +573,7 @@ impl Scalar {
     }
 
     /// Convert to bytes (big-endian). Allocation-free.
-    pub fn to_bytes(&self) -> [u8; 32] {
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut be = self.to_bytes_le();
         be.reverse();
         be
@@ -719,7 +722,12 @@ impl DefaultIsZeroes for ProjectivePoint {}
 /// distinct byte strings decoded to the same point); the extra byte has been
 /// removed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct GroupRepr(pub [u8; 32]);
+pub struct GroupRepr(pub [u8; Self::SIZE]);
+
+impl GroupRepr {
+    /// Size of the canonical group encoding in bytes.
+    pub const SIZE: usize = 32;
+}
 
 impl AsRef<[u8]> for GroupRepr {
     fn as_ref(&self) -> &[u8] {
@@ -752,7 +760,7 @@ impl GroupEncoding for ProjectivePoint {
         // Serialize the affine point using the backend's CanonicalSerialize.
         // The compressed format is exactly 32 bytes (little-endian y with the
         // x-sign flag in the spare high bits of the final byte).
-        let mut bytes = [0u8; 32];
+        let mut bytes = [0u8; Scalar::SIZE];
         backend_affine
             .serialize_with_mode(bytes.as_mut(), Compress::Yes)
             .expect("serialization to 32 bytes should succeed");
