@@ -28,6 +28,13 @@ zero-knowledge proofs like zk-SNARKs and ZK-Rollups.
   implemented for `Scalar`, `AffinePoint`, and `ProjectivePoint`
   **unconditionally** via `elliptic-curve`'s re-exported `zeroize`, which
   `CurveArithmetic` requires — so it no longer depends on this feature.
+- `hash2curve` (**off** by default): enables the RFC 9380 `GroupDigest` impl for
+  `BabyJubJub`, which commits to the `ExpandMsgXmd<Sha256>` expander and therefore
+  pulls in `sha2`. The curve-specific `MapToCurve` map and the `hash2curve`
+  crate's expander-generic `hash_from_bytes` / `encode_from_bytes` /
+  `hash_to_scalar` free functions are available **without** this feature
+  (`no_std`-safe); it only adds the convenience `GroupDigest` trait with its
+  fixed hash. See [Hash-to-curve](#hash-to-curve).
 - Disabling default features builds `no_std`. Note that the arkworks backend still
   requires a global allocator (`alloc`), so this targets `no_std + alloc`
   environments rather than bare-metal `no_std` without an allocator.
@@ -114,6 +121,30 @@ let bytes: GroupRepr = point.to_bytes();
 let decoded = ProjectivePoint::from_bytes(&bytes);
 ```
 
+### Hash-to-curve
+
+Map arbitrary byte strings to prime-order-subgroup points (RFC 9380), using the
+twisted-Edwards Elligator2 map followed by cofactor clearing.
+
+```rust
+use babyjubjub_ec::{BabyJubJub, hash2curve};
+use babyjubjub_ec::hash2curve::ExpandMsgXmd;
+use sha2::Sha256;
+
+let dst = b"BabyJubJub_XMD:SHA-256_ELL2_RO_";
+let msg = b"my message";
+
+// Expander-generic free function — works without the `hash2curve` feature; the
+// caller chooses the expander/hash:
+let p = hash2curve::hash_from_bytes::<BabyJubJub, ExpandMsgXmd<Sha256>>(&[msg], &[dst]).unwrap();
+
+// With the `hash2curve` feature enabled, the `GroupDigest` trait fixes the
+// expander to `ExpandMsgXmd<Sha256>`, so no expander type parameter is needed:
+//
+//     use babyjubjub_ec::hash2curve::GroupDigest;
+//     let p = BabyJubJub::hash_from_bytes(&[msg], &[dst]).unwrap();
+```
+
 ## API Overview
 
 ### Types
@@ -125,6 +156,7 @@ let decoded = ProjectivePoint::from_bytes(&bytes);
 | `ProjectivePoint` | Projective point representation (x, y, z coordinates) |
 | `Scalar` | Scalar field element |
 | `GroupRepr` | Group element representation for serialization |
+| `FieldElement` | Base-field intermediate used by hash-to-curve (the `MapToCurve::FieldElement`) |
 
 ### Traits Implemented
 
@@ -148,6 +180,15 @@ let decoded = ProjectivePoint::from_bytes(&bytes);
   `[u8; 32]`, as `CurveArithmetic` mandates. If you have a `[u8; 32]`, pass
   `bytes.into()` to `from_repr` / `from_repr_vartime`.
 - `group::GroupEncoding` for `ProjectivePoint` and `AffinePoint`
+- `group::prime::PrimeGroup` and `group::cofactor::CofactorGroup` for
+  `ProjectivePoint` (with `Subgroup = ProjectivePoint`). `clear_cofactor`
+  computes `[8]·P`, projecting any point onto the prime-order subgroup.
+- `hash2curve::MapToCurve` for `BabyJubJub` (twisted-Edwards **Elligator2** map;
+  always available) and, behind the `hash2curve` feature,
+  `hash2curve::GroupDigest` (RFC 9380 hash-to-curve over `ExpandMsgXmd<Sha256>`).
+  `elliptic_curve::ops::Reduce<Array<u8, U48>>` is implemented for both
+  `FieldElement` and `Scalar` (the latter enables `hash_to_scalar`). The
+  `hash2curve` crate is re-exported as `babyjubjub_ec::hash2curve`.
 - `subtle::ConditionallySelectable` and `subtle::ConstantTimeEq` for
   `ProjectivePoint`, `AffinePoint`, `Scalar`
 - `zeroize::DefaultIsZeroes` for all point and scalar types (**unconditional**)
@@ -203,6 +244,14 @@ This crate is a thin wrapper over the arkworks backend. Please note:
   prime-order-subgroup membership. The `from_bytes_unchecked` decoder does **not**;
   for untrusted coordinates use `AffinePoint::new` or the `is_on_curve` /
   `is_in_prime_order_subgroup` helpers.
+- **Cofactor & point arithmetic.** Point arithmetic (`+`, `-`, `*`, doubling)
+  is **total**: it computes the complete twisted-Edwards group law for any
+  on-curve point and neither rejects nor clears torsion / small-subgroup
+  components. Consequently a scalar multiple of an attacker-controlled point can
+  carry a torsion component (a small-subgroup hazard); use
+  `ProjectivePoint::mul_with_cofactor_clear` or `CofactorGroup::clear_cofactor`
+  when the result must lie in the prime-order subgroup. (RFC 9380 hash-to-curve
+  clears the cofactor for you.)
 - **Canonical encodings.** Scalar decoding (`from_bytes`, `from_repr`) rejects
   non-canonical values `>= r`, and the point encoding is a canonical 32 bytes,
   preventing scalar/point malleability. Use `Scalar::reduce_bytes_be` when

@@ -981,6 +981,10 @@ fn test_scalar_is_high() {
 }
 
 #[test]
+// This test deliberately exercises every operand/reference combination of the
+// `Mul` impls, so the `op_ref` lint (which flags `&s * g` etc.) must be allowed
+// here — matching the `#[allow(clippy::op_ref)]` on the equivalent lib test.
+#[allow(clippy::op_ref)]
 fn test_scalar_times_point_equals_point_times_scalar() {
     let s = Scalar::from(123_456_789u64);
     let g = ProjectivePoint::GENERATOR;
@@ -1111,4 +1115,101 @@ fn test_affine_point_default_is_identity() {
     // generic `NonIdentity` machinery treats it as the identity sentinel).
     assert_eq!(AffinePoint::default(), AffinePoint::IDENTITY);
     assert_eq!(ProjectivePoint::default(), ProjectivePoint::IDENTITY);
+}
+
+// ==================== CofactorGroup Tests ====================
+
+#[test]
+fn test_projective_point_implements_cofactor_group() {
+    use babyjubjub_ec::group::cofactor::CofactorGroup;
+
+    // Compile-time check that ProjectivePoint satisfies the CofactorGroup bound.
+    fn assert_cofactor_group<T: CofactorGroup>() {}
+    assert_cofactor_group::<ProjectivePoint>();
+
+    // The generator is in the prime-order subgroup.
+    let g = ProjectivePoint::GENERATOR;
+    assert!(bool::from(g.is_torsion_free()));
+    assert!(!bool::from(g.is_small_order()));
+    assert!(g.clear_cofactor().is_in_prime_order_subgroup());
+    assert_eq!(Option::from(g.into_subgroup()), Some(g));
+
+    // The order-2 torsion point (0, -1) is constructible through the public
+    // struct fields; it is not torsion-free, is small-order, and clears to the
+    // identity. (`BackendBaseField::from` avoids needing the backend's field
+    // traits in scope, matching the rest of this test file.)
+    let one = BackendBaseField::from(1u64);
+    let p2 = ProjectivePoint {
+        x: BackendBaseField::from(0u64),
+        y: -one,
+        z: one,
+    };
+    assert!(!bool::from(p2.is_torsion_free()));
+    assert!(bool::from(p2.is_small_order()));
+    assert!(bool::from(p2.into_subgroup().is_none()));
+    assert!(p2.clear_cofactor().is_identity());
+}
+
+// ============== Hash-to-curve (MapToCurve / GroupDigest) Tests ==============
+
+#[test]
+fn test_babyjubjub_map_to_curve_and_hash_free_fn() {
+    use babyjubjub_ec::FieldElement;
+    use babyjubjub_ec::group::cofactor::CofactorGroup;
+    use babyjubjub_ec::hash2curve::{self, ExpandMsgXmd, MapToCurve};
+    use sha2::Sha256;
+
+    // Compile-time check that BabyJubJub implements MapToCurve (always available,
+    // no `hash2curve` feature required).
+    fn assert_map_to_curve<C: MapToCurve>() {}
+    assert_map_to_curve::<BabyJubJub>();
+
+    // `FieldElement` (the MapToCurve::FieldElement) is part of the public API.
+    let _: FieldElement = FieldElement::default();
+
+    // The map yields an on-curve point; clearing the cofactor lands it in the
+    // prime-order subgroup.
+    let mapped = <BabyJubJub as MapToCurve>::map_to_curve(FieldElement::default());
+    assert!(mapped.is_on_curve());
+    assert!(mapped.clear_cofactor().is_in_prime_order_subgroup());
+
+    // End-to-end hash-to-curve via the expander-generic free functions (work
+    // without the `hash2curve` feature): deterministic, on-curve, in-subgroup.
+    let dst: &[u8] = b"BabyJubJub_XMD:SHA-256_ELL2_RO_";
+    let msg: &[u8] = b"public api hash-to-curve";
+    let p =
+        hash2curve::hash_from_bytes::<BabyJubJub, ExpandMsgXmd<Sha256>>(&[msg], &[dst]).unwrap();
+    assert!(p.is_on_curve());
+    assert!(p.is_in_prime_order_subgroup());
+    let p_again =
+        hash2curve::hash_from_bytes::<BabyJubJub, ExpandMsgXmd<Sha256>>(&[msg], &[dst]).unwrap();
+    assert_eq!(p, p_again);
+
+    // `hash_to_scalar` is available because `Scalar: Reduce<Array<u8, U48>>`.
+    type L = elliptic_curve::consts::U48;
+    let s =
+        hash2curve::hash_to_scalar::<BabyJubJub, ExpandMsgXmd<Sha256>, L>(&[msg], &[dst]).unwrap();
+    let s_again =
+        hash2curve::hash_to_scalar::<BabyJubJub, ExpandMsgXmd<Sha256>, L>(&[msg], &[dst]).unwrap();
+    assert_eq!(s, s_again);
+}
+
+#[cfg(feature = "hash2curve")]
+#[test]
+fn test_babyjubjub_implements_group_digest() {
+    use babyjubjub_ec::hash2curve::GroupDigest;
+
+    // Compile-time check that BabyJubJub satisfies the GroupDigest bound.
+    fn assert_group_digest<C: GroupDigest>() {}
+    assert_group_digest::<BabyJubJub>();
+
+    // The trait fixes the expander (ExpandMsgXmd<Sha256>), so `hash_from_bytes`
+    // takes no expander type parameter.
+    let dst: &[u8] = b"BabyJubJub_XMD:SHA-256_ELL2_RO_";
+    let msg: &[u8] = b"public api group digest";
+    let p = BabyJubJub::hash_from_bytes(&[msg], &[dst]).unwrap();
+    assert!(p.is_on_curve());
+    assert!(p.is_in_prime_order_subgroup());
+    let p_again = BabyJubJub::hash_from_bytes(&[msg], &[dst]).unwrap();
+    assert_eq!(p, p_again);
 }

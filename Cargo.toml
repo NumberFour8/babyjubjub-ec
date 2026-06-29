@@ -16,7 +16,14 @@ ark-ec = { version = "0.5", default-features = false }
 ark-ff = { version = "0.5", default-features = false }
 ark-serialize = { version = "0.5", default-features = false }
 # elliptic-curve traits
-elliptic-curve = { version = "0.14.0", default-features = false, features = ["arithmetic"] }
+elliptic-curve = { version = "0.14.1", default-features = false, features = ["arithmetic"] }
+# Hash-to-curve traits (`MapToCurve`, `GroupDigest`, RFC 9380). In the 0.14
+# ecosystem these were split out of `elliptic-curve` into this standalone,
+# `no_std` crate; it only pulls in `elliptic-curve` (arithmetic) + `digest`, so
+# the `no_std` build stays intact. The curve-specific `MapToCurve` map is always
+# available; the `GroupDigest` convenience trait is behind the `hash2curve`
+# feature (see `[features]`).
+hash2curve = { version = "0.14", default-features = false }
 # Scalar field operations
 ff = { version = "0.14", default-features = false }
 # group crate for core group traits
@@ -33,6 +40,10 @@ subtle = { version = "2.6", default-features = false }
 taceo-ark-babyjubjub = { version = "0.5.3" }
 # Zeroize (optional - enables DefaultIsZeroes implementations)
 zeroize = { version = "1.9", default-features = false, optional = true }
+# `sha2` is only needed by the optional `hash2curve` feature, which fixes the
+# `GroupDigest` expander to `ExpandMsgXmd<Sha256>`. `default-features = false`
+# keeps it `no_std`-compatible.
+sha2 = { version = "0.11", default-features = false, optional = true }
 
 [features]
 default = ["std"]
@@ -44,6 +55,12 @@ std = [
     "ark-serialize/std",
 ]
 zeroize = ["dep:zeroize"]
+# Enables the `GroupDigest` (RFC 9380 hash-to-curve) impl for `BabyJubJub`,
+# which commits to the `ExpandMsgXmd<Sha256>` expander and therefore pulls in
+# `sha2`. The curve-specific `MapToCurve` map and the `hash2curve` crate's
+# expander-generic free functions are available *without* this feature; it only
+# adds the convenience `GroupDigest` trait with its fixed hash.
+hash2curve = ["dep:sha2"]
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false }
@@ -51,6 +68,11 @@ hex = "0.4"
 # `std_rng` is required by tests that use `StdRng`; declare it explicitly rather
 # than relying on transitive feature unification from ark-std.
 rand = { version = "0.10" }
+# Concrete hash for the hash-to-curve tests, used as the `ExpandMsgXmd<Sha256>`
+# expander. Declared here (in addition to the optional dependency above) so the
+# always-available `MapToCurve` map can be exercised through the `hash2curve`
+# crate's free functions even when the `hash2curve` feature is off.
+sha2 = { version = "0.11", default-features = false }
 
 [[bench]]
 name = "scalar_mult"
