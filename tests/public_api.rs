@@ -1,6 +1,11 @@
 //! Public API tests for babyjubjub-ec
 //!
 //! These tests exercise only the public API and can be run as integration tests.
+//!
+//! The whole file requires the `arithmetic` feature (it uses the point/scalar
+//! types and the re-exported `group`/`ff` traits); the hash-to-curve tests at
+//! the end additionally require the `hash2curve` feature.
+#![cfg(feature = "arithmetic")]
 
 use babyjubjub_ec::group::ff::{Field, PrimeField};
 use babyjubjub_ec::group::{Group, GroupEncoding};
@@ -791,7 +796,7 @@ fn test_prime_field_repr_round_trip() {
         assert_eq!(back.unwrap(), s);
     }
     // from_repr rejects a non-canonical (>= r) encoding.
-    assert!(bool::from(Scalar::from_repr([0xFFu8; 32]).is_none()));
+    assert!(bool::from(Scalar::from_repr([0xFFu8; 32].into()).is_none()));
 }
 
 // ==================== Assign-Operator Tests ====================
@@ -859,4 +864,480 @@ fn test_babyjubjub_implements_prime_curve() {
     fn assert_prime_curve<C: elliptic_curve::PrimeCurve>() {}
     assert_prime_curve::<BabyJubJub>();
     let _ = <BabyJubJub as elliptic_curve::Curve>::ORDER;
+}
+
+// ==================== CurveArithmetic Tests ====================
+
+#[test]
+fn test_babyjubjub_implements_curve_arithmetic() {
+    // Compile-time check that BabyJubJub satisfies the full CurveArithmetic bound.
+    fn assert_curve_arithmetic<C: elliptic_curve::CurveArithmetic>() {}
+    assert_curve_arithmetic::<BabyJubJub>();
+
+    // The associated types are exactly the crate's wrapper types (this only
+    // type-checks if they are identical).
+    let _scalar: <BabyJubJub as elliptic_curve::CurveArithmetic>::Scalar = Scalar::ONE;
+    let _affine: <BabyJubJub as elliptic_curve::CurveArithmetic>::AffinePoint =
+        AffinePoint::GENERATOR;
+    let _projective: <BabyJubJub as elliptic_curve::CurveArithmetic>::ProjectivePoint =
+        ProjectivePoint::GENERATOR;
+}
+
+#[test]
+fn test_scalar_u256_round_trip() {
+    use elliptic_curve::bigint::U256;
+    use elliptic_curve::bigint::modular::Retrieve;
+    use elliptic_curve::scalar::FromUintUnchecked;
+
+    for s in [
+        Scalar::ZERO,
+        Scalar::ONE,
+        Scalar::from(42u64),
+        Scalar::ZERO - Scalar::ONE, // r - 1, the largest canonical scalar
+    ] {
+        let u: U256 = s.into();
+        // `retrieve` agrees with the `Into<U256>` conversion.
+        assert_eq!(s.retrieve(), u);
+        // `from_uint_unchecked` round-trips canonical (< r) integers.
+        assert_eq!(Scalar::from_uint_unchecked(u), s);
+    }
+}
+
+#[test]
+fn test_scalar_scalarvalue_round_trip() {
+    use elliptic_curve::ScalarValue;
+
+    for s in [Scalar::ZERO, Scalar::ONE, Scalar::from(123u64)] {
+        let sv: ScalarValue<BabyJubJub> = s.into();
+        let back: Scalar = sv.into();
+        assert_eq!(back, s);
+    }
+}
+
+#[test]
+fn test_scalar_fieldbytes_round_trip() {
+    use elliptic_curve::FieldBytes;
+
+    for s in [
+        Scalar::ZERO,
+        Scalar::ONE,
+        Scalar::from(99u64),
+        Scalar::ZERO - Scalar::ONE,
+    ] {
+        let fb: FieldBytes<BabyJubJub> = s.into();
+        // `Into<FieldBytes>` matches `PrimeField::to_repr`.
+        assert_eq!(fb, s.to_repr());
+        assert_eq!(Scalar::from_repr(fb).unwrap(), s);
+    }
+}
+
+#[test]
+fn test_nonzero_scalar_conversions() {
+    use elliptic_curve::NonZeroScalar;
+
+    // Zero is rejected, both via `new` and `TryFrom` (with `elliptic_curve::Error`).
+    assert!(bool::from(
+        NonZeroScalar::<BabyJubJub>::new(Scalar::ZERO).is_none()
+    ));
+    assert!(NonZeroScalar::<BabyJubJub>::try_from(Scalar::ZERO).is_err());
+
+    // A non-zero scalar is accepted and round-trips losslessly.
+    let s = Scalar::from(7u64);
+    let nz = NonZeroScalar::<BabyJubJub>::try_from(s).expect("non-zero scalar");
+    let back: Scalar = nz.into();
+    assert_eq!(back, s);
+}
+
+#[test]
+fn test_scalar_reduce_u256_and_fieldbytes() {
+    use elliptic_curve::FieldBytes;
+    use elliptic_curve::bigint::U256;
+    use elliptic_curve::ops::Reduce;
+
+    // Values < r are returned unchanged.
+    assert_eq!(
+        <Scalar as Reduce<U256>>::reduce(&U256::from(5u64)),
+        Scalar::from(5u64)
+    );
+
+    // A value >= r is reduced; the result is canonical, hence idempotent.
+    let reduced = <Scalar as Reduce<U256>>::reduce(&U256::MAX);
+    let reduced_u: U256 = reduced.into();
+    assert_eq!(<Scalar as Reduce<U256>>::reduce(&reduced_u), reduced);
+
+    // `Reduce<FieldBytes>` reduces a non-canonical little-endian encoding too.
+    let fb: FieldBytes<BabyJubJub> = [0xFFu8; 32].into();
+    let r1 = <Scalar as Reduce<FieldBytes<BabyJubJub>>>::reduce(&fb);
+    let r1_bytes: FieldBytes<BabyJubJub> = r1.into();
+    assert_eq!(
+        <Scalar as Reduce<FieldBytes<BabyJubJub>>>::reduce(&r1_bytes),
+        r1
+    );
+}
+
+#[test]
+fn test_scalar_is_high() {
+    use elliptic_curve::scalar::IsHigh;
+
+    assert!(!bool::from(Scalar::ZERO.is_high()));
+    assert!(!bool::from(Scalar::ONE.is_high()));
+    // r - 1 is the largest scalar and is unambiguously in the upper half.
+    assert!(bool::from((Scalar::ZERO - Scalar::ONE).is_high()));
+}
+
+#[test]
+// This test deliberately exercises every operand/reference combination of the
+// `Mul` impls, so the `op_ref` lint (which flags `&s * g` etc.) must be allowed
+// here — matching the `#[allow(clippy::op_ref)]` on the equivalent lib test.
+#[allow(clippy::op_ref)]
+fn test_scalar_times_point_equals_point_times_scalar() {
+    let s = Scalar::from(123_456_789u64);
+    let g = ProjectivePoint::GENERATOR;
+    let expected = g * s;
+
+    // Scalar * ProjectivePoint, in every operand/reference combination.
+    assert_eq!(s * g, expected);
+    assert_eq!(&s * g, expected);
+    assert_eq!(s * &g, expected);
+    assert_eq!(&s * &g, expected);
+
+    // Scalar * AffinePoint matches, in both operand orders.
+    let ga = AffinePoint::GENERATOR;
+    assert_eq!(s * ga, expected);
+    assert_eq!(ga * s, expected);
+}
+
+#[test]
+fn test_mul_vartime_and_mul_by_generator_vartime() {
+    use elliptic_curve::ops::{MulByGeneratorVartime, MulVartime};
+
+    let s = Scalar::from(98_765u64);
+    let g = ProjectivePoint::GENERATOR;
+    let expected = g * s;
+
+    // Variable-time multiplication agrees with the constant-time result.
+    assert_eq!(g.mul_vartime(s), expected);
+    assert_eq!(g.mul_vartime(&s), expected);
+    assert_eq!(s.mul_vartime(g), expected);
+    assert_eq!(AffinePoint::GENERATOR.mul_vartime(s), expected);
+
+    // mul_by_generator_vartime(s) == G * s.
+    assert_eq!(ProjectivePoint::mul_by_generator_vartime(&s), expected);
+}
+
+#[test]
+fn test_linear_combination_two_terms() {
+    use elliptic_curve::ops::LinearCombination;
+
+    let g = ProjectivePoint::GENERATOR;
+    let q = g + g; // 2G
+    let a = Scalar::from(3u64);
+    let b = Scalar::from(5u64);
+
+    let pairs = [(g, a), (q, b)];
+    let combined = ProjectivePoint::lincomb(&pairs);
+    assert_eq!(combined, g * a + q * b);
+}
+
+#[test]
+fn test_curve_group_to_affine_and_batch_normalize() {
+    use elliptic_curve::{BatchNormalize, CurveAffine, CurveGroup};
+
+    let g = ProjectivePoint::GENERATOR;
+    let p = g + g; // z != 1
+
+    // CurveGroup::to_affine matches the inherent to_affine.
+    assert_eq!(CurveGroup::to_affine(&p), p.to_affine());
+
+    // BatchNormalize of an array equals per-element normalization.
+    let arr = [g, p, g + p];
+    let normalized =
+        <ProjectivePoint as BatchNormalize<[ProjectivePoint; 3]>>::batch_normalize(&arr);
+    for (point, affine) in arr.iter().zip(normalized.iter()) {
+        assert_eq!(*affine, point.to_affine());
+    }
+
+    // CurveAffine::to_curve round-trips with to_affine.
+    let affine = p.to_affine();
+    assert_eq!(CurveAffine::to_curve(&affine), p);
+
+    // CurveAffine identity / generator accessors.
+    assert!(bool::from(CurveAffine::is_identity(&AffinePoint::IDENTITY)));
+    assert!(!bool::from(CurveAffine::is_identity(
+        &AffinePoint::GENERATOR
+    )));
+    assert_eq!(
+        <AffinePoint as CurveAffine>::generator(),
+        AffinePoint::GENERATOR
+    );
+}
+
+#[test]
+fn test_affine_coordinates() {
+    use elliptic_curve::FieldBytes;
+    use elliptic_curve::point::AffineCoordinates;
+
+    let g = AffinePoint::GENERATOR;
+    // Call the trait methods explicitly: the inherent `x`/`y` return field
+    // elements (not `FieldBytes`) and would otherwise shadow the trait methods.
+    let gx = AffineCoordinates::x(&g);
+    let gy = AffineCoordinates::y(&g);
+    let rebuilt = AffinePoint::from_coordinates(&gx, &gy);
+    assert!(bool::from(rebuilt.is_some()));
+    assert_eq!(rebuilt.unwrap(), g);
+
+    // (0, 0) is not on the curve and must be rejected.
+    let zero = FieldBytes::<BabyJubJub>::default();
+    assert!(bool::from(
+        AffinePoint::from_coordinates(&zero, &zero).is_none()
+    ));
+}
+
+#[test]
+fn test_nonidentity_conversions() {
+    use elliptic_curve::point::NonIdentity;
+
+    // The identity is rejected for both point types.
+    assert!(NonIdentity::<ProjectivePoint>::try_from(ProjectivePoint::IDENTITY).is_err());
+    assert!(NonIdentity::<AffinePoint>::try_from(AffinePoint::IDENTITY).is_err());
+
+    // A non-identity projective point is accepted and round-trips.
+    let g = ProjectivePoint::GENERATOR;
+    let nz = NonIdentity::<ProjectivePoint>::try_from(g).expect("generator is non-identity");
+    let back: ProjectivePoint = nz.into();
+    assert_eq!(back, g);
+
+    // Same for affine.
+    let ga = AffinePoint::GENERATOR;
+    let nza = NonIdentity::<AffinePoint>::try_from(ga).expect("generator is non-identity");
+    let backa: AffinePoint = nza.into();
+    assert_eq!(backa, ga);
+}
+
+#[test]
+fn test_affine_point_default_is_identity() {
+    // `Default` for both point types is now the group identity (required so the
+    // generic `NonIdentity` machinery treats it as the identity sentinel).
+    assert_eq!(AffinePoint::default(), AffinePoint::IDENTITY);
+    assert_eq!(ProjectivePoint::default(), ProjectivePoint::IDENTITY);
+}
+
+// ==================== CofactorGroup Tests ====================
+
+#[test]
+fn test_projective_point_implements_cofactor_group() {
+    use babyjubjub_ec::group::cofactor::CofactorGroup;
+
+    // Compile-time check that ProjectivePoint satisfies the CofactorGroup bound.
+    fn assert_cofactor_group<T: CofactorGroup>() {}
+    assert_cofactor_group::<ProjectivePoint>();
+
+    // The generator is in the prime-order subgroup.
+    let g = ProjectivePoint::GENERATOR;
+    assert!(bool::from(g.is_torsion_free()));
+    assert!(!bool::from(g.is_small_order()));
+    assert!(g.clear_cofactor().is_in_prime_order_subgroup());
+    assert_eq!(Option::from(g.into_subgroup()), Some(g));
+
+    // The order-2 torsion point (0, -1) is constructible through the public
+    // struct fields; it is not torsion-free, is small-order, and clears to the
+    // identity. (`BackendBaseField::from` avoids needing the backend's field
+    // traits in scope, matching the rest of this test file.)
+    let one = BackendBaseField::from(1u64);
+    let p2 = ProjectivePoint {
+        x: BackendBaseField::from(0u64),
+        y: -one,
+        z: one,
+    };
+    assert!(!bool::from(p2.is_torsion_free()));
+    assert!(bool::from(p2.is_small_order()));
+    assert!(bool::from(p2.into_subgroup().is_none()));
+    assert!(p2.clear_cofactor().is_identity());
+}
+
+// ============== Hash-to-curve (MapToCurve / GroupDigest) Tests ==============
+
+#[cfg(feature = "hash2curve")]
+#[test]
+fn test_babyjubjub_map_to_curve_and_hash_free_fn() {
+    use babyjubjub_ec::FieldElement;
+    use babyjubjub_ec::group::cofactor::CofactorGroup;
+    use babyjubjub_ec::hash2curve::{self, ExpandMsgXmd, MapToCurve};
+    use sha2::Sha256;
+
+    // Compile-time check that BabyJubJub implements MapToCurve (gated, with the
+    // rest of the hash-to-curve surface, on the `hash2curve` feature).
+    fn assert_map_to_curve<C: MapToCurve>() {}
+    assert_map_to_curve::<BabyJubJub>();
+
+    // `FieldElement` (the MapToCurve::FieldElement) is part of the public API.
+    let _: FieldElement = FieldElement::default();
+
+    // The map yields an on-curve point; clearing the cofactor lands it in the
+    // prime-order subgroup.
+    let mapped = <BabyJubJub as MapToCurve>::map_to_curve(FieldElement::default());
+    assert!(mapped.is_on_curve());
+    assert!(mapped.clear_cofactor().is_in_prime_order_subgroup());
+
+    // End-to-end hash-to-curve via the expander-generic free functions:
+    // deterministic, on-curve, in-subgroup.
+    let dst: &[u8] = b"BabyJubJub_XMD:SHA-256_ELL2_RO_";
+    let msg: &[u8] = b"public api hash-to-curve";
+    let p =
+        hash2curve::hash_from_bytes::<BabyJubJub, ExpandMsgXmd<Sha256>>(&[msg], &[dst]).unwrap();
+    assert!(p.is_on_curve());
+    assert!(p.is_in_prime_order_subgroup());
+    let p_again =
+        hash2curve::hash_from_bytes::<BabyJubJub, ExpandMsgXmd<Sha256>>(&[msg], &[dst]).unwrap();
+    assert_eq!(p, p_again);
+
+    // `hash_to_scalar` is available because `Scalar: Reduce<Array<u8, U48>>`.
+    type L = elliptic_curve::consts::U48;
+    let s =
+        hash2curve::hash_to_scalar::<BabyJubJub, ExpandMsgXmd<Sha256>, L>(&[msg], &[dst]).unwrap();
+    let s_again =
+        hash2curve::hash_to_scalar::<BabyJubJub, ExpandMsgXmd<Sha256>, L>(&[msg], &[dst]).unwrap();
+    assert_eq!(s, s_again);
+}
+
+#[cfg(feature = "hash2curve")]
+#[test]
+fn test_babyjubjub_implements_group_digest() {
+    use babyjubjub_ec::hash2curve::GroupDigest;
+
+    // Compile-time check that BabyJubJub satisfies the GroupDigest bound.
+    fn assert_group_digest<C: GroupDigest>() {}
+    assert_group_digest::<BabyJubJub>();
+
+    // The trait fixes the expander (ExpandMsgXmd<Sha256>), so `hash_from_bytes`
+    // takes no expander type parameter.
+    let dst: &[u8] = b"BabyJubJub_XMD:SHA-256_ELL2_RO_";
+    let msg: &[u8] = b"public api group digest";
+    let p = BabyJubJub::hash_from_bytes(&[msg], &[dst]).unwrap();
+    assert!(p.is_on_curve());
+    assert!(p.is_in_prime_order_subgroup());
+    let p_again = BabyJubJub::hash_from_bytes(&[msg], &[dst]).unwrap();
+    assert_eq!(p, p_again);
+}
+
+// ==================== serde Tests ====================
+//
+// These require the `serde` feature (which implies `arithmetic`). `serde_json`
+// is human-readable and exercises the lowercase-hex path of `serdect`;
+// `ciborium` (CBOR) is a binary format and exercises the raw-bytes path.
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_scalar_json_round_trip() {
+    // Human-readable formats encode the canonical 32-byte big-endian value as
+    // lowercase hex.
+    let s = Scalar::from(0x0123_4567_89ab_cdefu64);
+    let json = serde_json::to_string(&s).unwrap();
+    assert_eq!(json, format!("\"{}\"", hex::encode(s.to_bytes())));
+
+    let back: Scalar = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, s);
+
+    // Representative values round-trip.
+    for s in [Scalar::ZERO, Scalar::ONE, Scalar::from(42u64), -Scalar::ONE] {
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Scalar = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_scalar_cbor_round_trip() {
+    // Binary formats use the raw bytes (no hex), exercising the other serdect path.
+    for s in [
+        Scalar::ZERO,
+        Scalar::ONE,
+        Scalar::from(123_456_789u64),
+        -Scalar::ONE,
+    ] {
+        let mut buf = Vec::new();
+        ciborium::into_writer(&s, &mut buf).unwrap();
+        let back: Scalar = ciborium::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(back, s);
+    }
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_scalar_rejects_non_canonical() {
+    // 32 x 0xFF encodes a value far larger than the scalar field order r, so the
+    // canonical decoder must reject it.
+    let non_canonical = format!("\"{}\"", "ff".repeat(32));
+    assert!(serde_json::from_str::<Scalar>(&non_canonical).is_err());
+
+    // A wrong-length encoding is rejected too (serdect enforces the exact 32-byte
+    // buffer length).
+    assert!(serde_json::from_str::<Scalar>("\"00\"").is_err());
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_affine_point_json_round_trip() {
+    // Points use the canonical 32-byte compressed encoding, hex-encoded for JSON.
+    let g = AffinePoint::GENERATOR;
+    let json = serde_json::to_string(&g).unwrap();
+    assert_eq!(
+        json,
+        format!("\"{}\"", hex::encode(ProjectivePoint::from(g).to_bytes()))
+    );
+
+    let back: AffinePoint = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, g);
+
+    // The identity round-trips.
+    let id = AffinePoint::IDENTITY;
+    let json_id = serde_json::to_string(&id).unwrap();
+    let back_id: AffinePoint = serde_json::from_str(&json_id).unwrap();
+    assert_eq!(back_id, id);
+
+    // A generic in-subgroup point (a scalar multiple of the generator) round-trips.
+    let p = (ProjectivePoint::GENERATOR * Scalar::from(7u64)).to_affine();
+    let json_p = serde_json::to_string(&p).unwrap();
+    let back_p: AffinePoint = serde_json::from_str(&json_p).unwrap();
+    assert_eq!(back_p, p);
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_affine_point_cbor_round_trip() {
+    let g = AffinePoint::GENERATOR;
+    let mut buf = Vec::new();
+    ciborium::into_writer(&g, &mut buf).unwrap();
+    let back: AffinePoint = ciborium::from_reader(buf.as_slice()).unwrap();
+    assert_eq!(back, g);
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_affine_point_rejects_out_of_subgroup() {
+    // The order-2 torsion point (0, -1) is on the curve but NOT in the
+    // prime-order subgroup. Serializing succeeds (serialization does not
+    // validate), but deserializing must reject it because the decoder enforces
+    // subgroup membership — on both the human-readable and the binary path.
+    let one = BackendBaseField::from(1u64);
+    let torsion = AffinePoint {
+        x: BackendBaseField::from(0u64),
+        y: -one,
+    };
+
+    let json = serde_json::to_string(&torsion).unwrap();
+    assert!(serde_json::from_str::<AffinePoint>(&json).is_err());
+
+    let mut buf = Vec::new();
+    ciborium::into_writer(&torsion, &mut buf).unwrap();
+    assert!(ciborium::from_reader::<AffinePoint, _>(buf.as_slice()).is_err());
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_affine_point_rejects_garbage() {
+    // 32 x 0xFF is not a valid compressed point encoding.
+    let garbage = format!("\"{}\"", "ff".repeat(32));
+    assert!(serde_json::from_str::<AffinePoint>(&garbage).is_err());
 }
