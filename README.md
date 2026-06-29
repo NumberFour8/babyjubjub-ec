@@ -23,18 +23,33 @@ zero-knowledge proofs like zk-SNARKs and ZK-Rollups.
 
 - `std` (default): enables standard-library support for this wrapper and the
   arkworks crates it uses directly.
+- `arithmetic` (default): the curve arithmetic — the `CurveArithmetic` impl plus
+  the `AffinePoint` / `ProjectivePoint` / `Scalar` wrapper types and all of their
+  `group`/`ff` trait impls (scalar multiplication, point operations, encodings,
+  and so on). Propagates to `elliptic-curve`'s own `arithmetic` feature (which in
+  turn pulls in the `group`/`ff` traits). Disable it (`--no-default-features`)
+  for a minimal build that exposes only the `Curve` / `PrimeCurve` marker impls
+  and the backend type re-exports.
 - `zeroize` (**off** by default): retained for backwards compatibility, but now a
-  no-op. `zeroize::DefaultIsZeroes` (and hence an explicit `.zeroize()`) is
-  implemented for `Scalar`, `AffinePoint`, and `ProjectivePoint`
+  no-op. With `arithmetic`, `zeroize::DefaultIsZeroes` (and hence an explicit
+  `.zeroize()`) is implemented for `Scalar`, `AffinePoint`, and `ProjectivePoint`
   **unconditionally** via `elliptic-curve`'s re-exported `zeroize`, which
   `CurveArithmetic` requires — so it no longer depends on this feature.
-- `hash2curve` (**off** by default): enables the RFC 9380 `GroupDigest` impl for
-  `BabyJubJub`, which commits to the `ExpandMsgXmd<Sha256>` expander and therefore
-  pulls in `sha2`. The curve-specific `MapToCurve` map and the `hash2curve`
-  crate's expander-generic `hash_from_bytes` / `encode_from_bytes` /
-  `hash_to_scalar` free functions are available **without** this feature
-  (`no_std`-safe); it only adds the convenience `GroupDigest` trait with its
-  fixed hash. See [Hash-to-curve](#hash-to-curve).
+- `hash2curve` (**off** by default): the RFC 9380 hash-to-curve surface — the
+  curve-specific `MapToCurve` (twisted-Edwards Elligator2) map, the `Reduce`
+  impls, and the `GroupDigest` impl (which commits to the `ExpandMsgXmd<Sha256>`
+  expander, hence `sha2`). Pulls in the standalone `hash2curve` crate and implies
+  `arithmetic` (hash-to-curve produces `ProjectivePoint`s). See
+  [Hash-to-curve](#hash-to-curve).
+- `serde` (**off** by default): implements `serde::Serialize` /
+  `serde::Deserialize` for `Scalar` and `AffinePoint`. Encodings go through
+  `serdect`, so values are rendered as lowercase hex for human-readable formats
+  (JSON, TOML, …) and as raw bytes for binary formats. `Scalar` uses its canonical
+  32-byte big-endian encoding and `AffinePoint` its canonical 32-byte compressed
+  encoding; deserialization re-validates input (canonical scalar `< r`; on-curve
+  **and** prime-order-subgroup point) and rejects anything else. Implies
+  `arithmetic` (the two types only exist with it) and propagates to
+  `elliptic-curve`'s own `serde` feature.
 - Disabling default features builds `no_std`. Note that the arkworks backend still
   requires a global allocator (`alloc`), so this targets `no_std + alloc`
   environments rather than bare-metal `no_std` without an allocator.
@@ -121,10 +136,33 @@ let bytes: GroupRepr = point.to_bytes();
 let decoded = ProjectivePoint::from_bytes(&bytes);
 ```
 
+With the `serde` feature, `Scalar` and `AffinePoint` also implement
+`serde::Serialize` / `serde::Deserialize` (lowercase hex for human-readable
+formats, raw bytes for binary formats; deserialization re-validates the input):
+
+```rust
+use babyjubjub_ec::{AffinePoint, Scalar};
+
+let scalar: Scalar = 42u64.into();
+let point = AffinePoint::GENERATOR;
+
+// JSON (human-readable) uses lowercase hex; a binary format would use raw bytes.
+let scalar_json = serde_json::to_string(&scalar).unwrap();
+let point_json = serde_json::to_string(&point).unwrap();
+
+// Deserialization rejects non-canonical scalars and off-curve / small-subgroup
+// points.
+let scalar2: Scalar = serde_json::from_str(&scalar_json).unwrap();
+let point2: AffinePoint = serde_json::from_str(&point_json).unwrap();
+assert_eq!(scalar, scalar2);
+assert_eq!(point, point2);
+```
+
 ### Hash-to-curve
 
 Map arbitrary byte strings to prime-order-subgroup points (RFC 9380), using the
-twisted-Edwards Elligator2 map followed by cofactor clearing.
+twisted-Edwards Elligator2 map followed by cofactor clearing. Requires the
+`hash2curve` feature (which implies `arithmetic`).
 
 ```rust
 use babyjubjub_ec::{BabyJubJub, hash2curve};
@@ -134,12 +172,11 @@ use sha2::Sha256;
 let dst = b"BabyJubJub_XMD:SHA-256_ELL2_RO_";
 let msg = b"my message";
 
-// Expander-generic free function — works without the `hash2curve` feature; the
-// caller chooses the expander/hash:
+// Expander-generic free function — the caller chooses the expander/hash:
 let p = hash2curve::hash_from_bytes::<BabyJubJub, ExpandMsgXmd<Sha256>>(&[msg], &[dst]).unwrap();
 
-// With the `hash2curve` feature enabled, the `GroupDigest` trait fixes the
-// expander to `ExpandMsgXmd<Sha256>`, so no expander type parameter is needed:
+// The `GroupDigest` trait fixes the expander to `ExpandMsgXmd<Sha256>`, so no
+// expander type parameter is needed:
 //
 //     use babyjubjub_ec::hash2curve::GroupDigest;
 //     let p = BabyJubJub::hash_from_bytes(&[msg], &[dst]).unwrap();
@@ -159,6 +196,10 @@ let p = hash2curve::hash_from_bytes::<BabyJubJub, ExpandMsgXmd<Sha256>>(&[msg], 
 | `FieldElement` | Base-field intermediate used by hash-to-curve (the `MapToCurve::FieldElement`) |
 
 ### Traits Implemented
+
+`Curve` and `PrimeCurve` are always available; everything else listed here
+requires the (default) `arithmetic` feature, the hash-to-curve traits
+additionally require `hash2curve`, and the serde impls require `serde`.
 
 - `elliptic_curve::Curve` and `elliptic_curve::PrimeCurve` for `BabyJubJub`
 - `elliptic_curve::CurveArithmetic` for `BabyJubJub`, with `AffinePoint`,
@@ -183,15 +224,21 @@ let p = hash2curve::hash_from_bytes::<BabyJubJub, ExpandMsgXmd<Sha256>>(&[msg], 
 - `group::prime::PrimeGroup` and `group::cofactor::CofactorGroup` for
   `ProjectivePoint` (with `Subgroup = ProjectivePoint`). `clear_cofactor`
   computes `[8]·P`, projecting any point onto the prime-order subgroup.
-- `hash2curve::MapToCurve` for `BabyJubJub` (twisted-Edwards **Elligator2** map;
-  always available) and, behind the `hash2curve` feature,
-  `hash2curve::GroupDigest` (RFC 9380 hash-to-curve over `ExpandMsgXmd<Sha256>`).
+- Behind the `hash2curve` feature: `hash2curve::MapToCurve` for `BabyJubJub`
+  (twisted-Edwards **Elligator2** map) and `hash2curve::GroupDigest` (RFC 9380
+  hash-to-curve over `ExpandMsgXmd<Sha256>`).
   `elliptic_curve::ops::Reduce<Array<u8, U48>>` is implemented for both
   `FieldElement` and `Scalar` (the latter enables `hash_to_scalar`). The
-  `hash2curve` crate is re-exported as `babyjubjub_ec::hash2curve`.
+  `hash2curve` crate is re-exported as `babyjubjub_ec::hash2curve` (also behind
+  the feature).
 - `subtle::ConditionallySelectable` and `subtle::ConstantTimeEq` for
   `ProjectivePoint`, `AffinePoint`, `Scalar`
 - `zeroize::DefaultIsZeroes` for all point and scalar types (**unconditional**)
+- Behind the `serde` feature: `serde::Serialize` / `serde::Deserialize` for
+  `Scalar` (its canonical 32-byte big-endian encoding) and `AffinePoint` (the
+  canonical 32-byte compressed encoding). Human-readable formats use lowercase
+  hex and binary formats raw bytes (via `serdect`); deserialization re-validates
+  the input. Propagates `elliptic-curve`'s own `serde` feature.
 
 ## Examples
 

@@ -1,6 +1,11 @@
 //! Public API tests for babyjubjub-ec
 //!
 //! These tests exercise only the public API and can be run as integration tests.
+//!
+//! The whole file requires the `arithmetic` feature (it uses the point/scalar
+//! types and the re-exported `group`/`ff` traits); the hash-to-curve tests at
+//! the end additionally require the `hash2curve` feature.
+#![cfg(feature = "arithmetic")]
 
 use babyjubjub_ec::group::ff::{Field, PrimeField};
 use babyjubjub_ec::group::{Group, GroupEncoding};
@@ -1152,6 +1157,7 @@ fn test_projective_point_implements_cofactor_group() {
 
 // ============== Hash-to-curve (MapToCurve / GroupDigest) Tests ==============
 
+#[cfg(feature = "hash2curve")]
 #[test]
 fn test_babyjubjub_map_to_curve_and_hash_free_fn() {
     use babyjubjub_ec::FieldElement;
@@ -1159,8 +1165,8 @@ fn test_babyjubjub_map_to_curve_and_hash_free_fn() {
     use babyjubjub_ec::hash2curve::{self, ExpandMsgXmd, MapToCurve};
     use sha2::Sha256;
 
-    // Compile-time check that BabyJubJub implements MapToCurve (always available,
-    // no `hash2curve` feature required).
+    // Compile-time check that BabyJubJub implements MapToCurve (gated, with the
+    // rest of the hash-to-curve surface, on the `hash2curve` feature).
     fn assert_map_to_curve<C: MapToCurve>() {}
     assert_map_to_curve::<BabyJubJub>();
 
@@ -1173,8 +1179,8 @@ fn test_babyjubjub_map_to_curve_and_hash_free_fn() {
     assert!(mapped.is_on_curve());
     assert!(mapped.clear_cofactor().is_in_prime_order_subgroup());
 
-    // End-to-end hash-to-curve via the expander-generic free functions (work
-    // without the `hash2curve` feature): deterministic, on-curve, in-subgroup.
+    // End-to-end hash-to-curve via the expander-generic free functions:
+    // deterministic, on-curve, in-subgroup.
     let dst: &[u8] = b"BabyJubJub_XMD:SHA-256_ELL2_RO_";
     let msg: &[u8] = b"public api hash-to-curve";
     let p =
@@ -1212,4 +1218,126 @@ fn test_babyjubjub_implements_group_digest() {
     assert!(p.is_in_prime_order_subgroup());
     let p_again = BabyJubJub::hash_from_bytes(&[msg], &[dst]).unwrap();
     assert_eq!(p, p_again);
+}
+
+// ==================== serde Tests ====================
+//
+// These require the `serde` feature (which implies `arithmetic`). `serde_json`
+// is human-readable and exercises the lowercase-hex path of `serdect`;
+// `ciborium` (CBOR) is a binary format and exercises the raw-bytes path.
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_scalar_json_round_trip() {
+    // Human-readable formats encode the canonical 32-byte big-endian value as
+    // lowercase hex.
+    let s = Scalar::from(0x0123_4567_89ab_cdefu64);
+    let json = serde_json::to_string(&s).unwrap();
+    assert_eq!(json, format!("\"{}\"", hex::encode(s.to_bytes())));
+
+    let back: Scalar = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, s);
+
+    // Representative values round-trip.
+    for s in [Scalar::ZERO, Scalar::ONE, Scalar::from(42u64), -Scalar::ONE] {
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Scalar = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_scalar_cbor_round_trip() {
+    // Binary formats use the raw bytes (no hex), exercising the other serdect path.
+    for s in [
+        Scalar::ZERO,
+        Scalar::ONE,
+        Scalar::from(123_456_789u64),
+        -Scalar::ONE,
+    ] {
+        let mut buf = Vec::new();
+        ciborium::into_writer(&s, &mut buf).unwrap();
+        let back: Scalar = ciborium::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(back, s);
+    }
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_scalar_rejects_non_canonical() {
+    // 32 x 0xFF encodes a value far larger than the scalar field order r, so the
+    // canonical decoder must reject it.
+    let non_canonical = format!("\"{}\"", "ff".repeat(32));
+    assert!(serde_json::from_str::<Scalar>(&non_canonical).is_err());
+
+    // A wrong-length encoding is rejected too (serdect enforces the exact 32-byte
+    // buffer length).
+    assert!(serde_json::from_str::<Scalar>("\"00\"").is_err());
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_affine_point_json_round_trip() {
+    // Points use the canonical 32-byte compressed encoding, hex-encoded for JSON.
+    let g = AffinePoint::GENERATOR;
+    let json = serde_json::to_string(&g).unwrap();
+    assert_eq!(
+        json,
+        format!("\"{}\"", hex::encode(ProjectivePoint::from(g).to_bytes()))
+    );
+
+    let back: AffinePoint = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, g);
+
+    // The identity round-trips.
+    let id = AffinePoint::IDENTITY;
+    let json_id = serde_json::to_string(&id).unwrap();
+    let back_id: AffinePoint = serde_json::from_str(&json_id).unwrap();
+    assert_eq!(back_id, id);
+
+    // A generic in-subgroup point (a scalar multiple of the generator) round-trips.
+    let p = (ProjectivePoint::GENERATOR * Scalar::from(7u64)).to_affine();
+    let json_p = serde_json::to_string(&p).unwrap();
+    let back_p: AffinePoint = serde_json::from_str(&json_p).unwrap();
+    assert_eq!(back_p, p);
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_affine_point_cbor_round_trip() {
+    let g = AffinePoint::GENERATOR;
+    let mut buf = Vec::new();
+    ciborium::into_writer(&g, &mut buf).unwrap();
+    let back: AffinePoint = ciborium::from_reader(buf.as_slice()).unwrap();
+    assert_eq!(back, g);
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_affine_point_rejects_out_of_subgroup() {
+    // The order-2 torsion point (0, -1) is on the curve but NOT in the
+    // prime-order subgroup. Serializing succeeds (serialization does not
+    // validate), but deserializing must reject it because the decoder enforces
+    // subgroup membership — on both the human-readable and the binary path.
+    let one = BackendBaseField::from(1u64);
+    let torsion = AffinePoint {
+        x: BackendBaseField::from(0u64),
+        y: -one,
+    };
+
+    let json = serde_json::to_string(&torsion).unwrap();
+    assert!(serde_json::from_str::<AffinePoint>(&json).is_err());
+
+    let mut buf = Vec::new();
+    ciborium::into_writer(&torsion, &mut buf).unwrap();
+    assert!(ciborium::from_reader::<AffinePoint, _>(buf.as_slice()).is_err());
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_serde_affine_point_rejects_garbage() {
+    // 32 x 0xFF is not a valid compressed point encoding.
+    let garbage = format!("\"{}\"", "ff".repeat(32));
+    assert!(serde_json::from_str::<AffinePoint>(&garbage).is_err());
 }

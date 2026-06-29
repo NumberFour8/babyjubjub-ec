@@ -15,19 +15,23 @@ ark-ec = { version = "0.5", default-features = false }
 # ark-ff for field traits (needed for BackendScalar operations)
 ark-ff = { version = "0.5", default-features = false }
 ark-serialize = { version = "0.5", default-features = false }
-# elliptic-curve traits
-elliptic-curve = { version = "0.14.1", default-features = false, features = ["arithmetic"] }
+# elliptic-curve traits. The `arithmetic` feature (which provides
+# `CurveArithmetic`, the point/scalar types, and the `group`/`ff` traits) is not
+# requested here directly; it is pulled in by this crate's own `arithmetic`
+# feature so the two stay in lockstep (see `[features]`).
+elliptic-curve = { version = "0.14.1", default-features = false }
 # Hash-to-curve traits (`MapToCurve`, `GroupDigest`, RFC 9380). In the 0.14
 # ecosystem these were split out of `elliptic-curve` into this standalone,
 # `no_std` crate; it only pulls in `elliptic-curve` (arithmetic) + `digest`, so
-# the `no_std` build stays intact. The curve-specific `MapToCurve` map is always
-# available; the `GroupDigest` convenience trait is behind the `hash2curve`
-# feature (see `[features]`).
-hash2curve = { version = "0.14", default-features = false }
-# Scalar field operations
-ff = { version = "0.14", default-features = false }
-# group crate for core group traits
-group = { version = "0.14", default-features = false, features = ["rand"] }
+# the `no_std` build stays intact. Optional: the whole hash-to-curve surface is
+# gated behind the `hash2curve` feature (see `[features]`).
+hash2curve = { version = "0.14", default-features = false, optional = true }
+# Scalar field operations. Optional: only used by the curve arithmetic, so it is
+# pulled in by the `arithmetic` feature.
+ff = { version = "0.14", default-features = false, optional = true }
+# group crate for core group traits. Optional: pulled in by the `arithmetic`
+# feature.
+group = { version = "0.14", default-features = false, features = ["rand"], optional = true }
 # num-traits for Zero and One traits
 num-traits = { version = "0.2", default-features = false }
 # Random number generation
@@ -44,23 +48,48 @@ zeroize = { version = "1.9", default-features = false, optional = true }
 # `GroupDigest` expander to `ExpandMsgXmd<Sha256>`. `default-features = false`
 # keeps it `no_std`-compatible.
 sha2 = { version = "0.11", default-features = false, optional = true }
+# Optional `serde` support for `Scalar` and `AffinePoint`. `default-features =
+# false` keeps it `no_std`-compatible (serde's `alloc` support is pulled in
+# transitively via `serdect`). Gated behind the `serde` feature.
+serde = { version = "1", default-features = false, optional = true }
+# Constant-time, format-aware serde helpers: `serdect` encodes byte arrays as
+# lowercase hex for human-readable formats and as raw bytes for binary formats.
+# This matches the RustCrypto ecosystem and `elliptic-curve`'s own `serde`
+# feature (which also pulls in `serdect`). Gated behind the `serde` feature.
+serdect = { version = "0.4", default-features = false, features = ["alloc"], optional = true }
 
 [features]
-default = ["std"]
+default = ["std", "arithmetic"]
 std = [
     "elliptic-curve/std",
-    "ff/std",
+    # `ff` is optional (only present with `arithmetic`), hence the `?`.
+    "ff?/std",
     "ark-ff/std",
     "ark-ec/std",
     "ark-serialize/std",
+    # `serde` is optional (only present with the `serde` feature), hence the `?`.
+    "serde?/std",
 ]
+# Curve arithmetic: the `CurveArithmetic` impl plus the `AffinePoint` /
+# `ProjectivePoint` / `Scalar` wrapper types and all of their `group`/`ff` trait
+# impls. Propagates to `elliptic-curve`'s own `arithmetic` feature (which in turn
+# pulls in the `group`/`ff` traits this crate builds on). On by default; disable
+# it (`--no-default-features`) for a minimal build exposing only the `Curve` /
+# `PrimeCurve` markers and the backend re-exports.
+arithmetic = ["elliptic-curve/arithmetic", "dep:group", "dep:ff"]
 zeroize = ["dep:zeroize"]
-# Enables the `GroupDigest` (RFC 9380 hash-to-curve) impl for `BabyJubJub`,
-# which commits to the `ExpandMsgXmd<Sha256>` expander and therefore pulls in
-# `sha2`. The curve-specific `MapToCurve` map and the `hash2curve` crate's
-# expander-generic free functions are available *without* this feature; it only
-# adds the convenience `GroupDigest` trait with its fixed hash.
-hash2curve = ["dep:sha2"]
+# RFC 9380 hash-to-curve: the curve-specific `MapToCurve` (Elligator2) map, the
+# `Reduce` impls, and the `GroupDigest` impl (which commits to the
+# `ExpandMsgXmd<Sha256>` expander, hence `sha2`). Pulls in the standalone
+# `hash2curve` crate and implies `arithmetic` (hash-to-curve produces
+# `ProjectivePoint`s). Off by default.
+hash2curve = ["arithmetic", "dep:hash2curve", "dep:sha2"]
+# serde (de)serialization for `Scalar` and `AffinePoint`. Encodings are produced
+# by `serdect`: lowercase hex for human-readable formats (JSON, TOML, …) and raw
+# bytes for binary formats. Implies `arithmetic` (the two types only exist with
+# it) and propagates to `elliptic-curve`'s own `serde` feature — the only
+# involved downstream dependency that exposes one. Off by default.
+serde = ["arithmetic", "dep:serde", "dep:serdect", "elliptic-curve/serde"]
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false }
@@ -69,14 +98,22 @@ hex = "0.4"
 # than relying on transitive feature unification from ark-std.
 rand = { version = "0.10" }
 # Concrete hash for the hash-to-curve tests, used as the `ExpandMsgXmd<Sha256>`
-# expander. Declared here (in addition to the optional dependency above) so the
-# always-available `MapToCurve` map can be exercised through the `hash2curve`
-# crate's free functions even when the `hash2curve` feature is off.
+# expander. Declared as a dev-dependency (in addition to the optional dependency
+# above) so the integration tests in `tests/` can name `sha2` directly; those
+# hash-to-curve tests are themselves gated on the `hash2curve` feature.
 sha2 = { version = "0.11", default-features = false }
+# serde round-trip checks (gated on the `serde` feature). `serde_json` exercises
+# the human-readable hex path of `serdect`; `ciborium` (CBOR, a binary format
+# whose `is_human_readable()` is `false`) exercises the raw-bytes path.
+serde_json = "1"
+ciborium = "0.2"
 
 [[bench]]
 name = "scalar_mult"
 harness = false
+# The benchmarks exercise scalar multiplication (part of the curve arithmetic),
+# so only build them when the `arithmetic` feature is enabled.
+required-features = ["arithmetic"]
 
 # Security patches
 # Note: avoid enabling the backend's `std` feature here. It enables optional

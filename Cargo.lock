@@ -193,6 +193,7 @@ dependencies = [
  "ark-ec",
  "ark-ff",
  "ark-serialize",
+ "ciborium",
  "criterion",
  "elliptic-curve",
  "ff",
@@ -202,6 +203,9 @@ dependencies = [
  "num-traits",
  "rand 0.10.1",
  "rand_core 0.10.1",
+ "serde",
+ "serde_json",
+ "serdect",
  "sha2",
  "subtle",
  "taceo-ark-babyjubjub",
@@ -487,6 +491,7 @@ dependencies = [
  "pkcs8",
  "rand_core 0.10.1",
  "sec1",
+ "serdect",
  "subtle",
  "zeroize",
 ]
@@ -831,6 +836,7 @@ dependencies = [
  "ctutils",
  "der",
  "hybrid-array",
+ "serdect",
  "subtle",
  "zeroize",
 ]
@@ -876,6 +882,16 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serdect"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66cf8fedced2fcf12406bcb34223dffb92eaf34908ede12fed414c82b7f00b3e"
+dependencies = [
+ "base16ct",
+ "serde",
 ]
 
 [[package]]
