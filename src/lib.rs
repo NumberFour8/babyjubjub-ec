@@ -78,6 +78,9 @@
 )]
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "serde", not(feature = "std")))]
+extern crate alloc;
+
 // ===== Re-export backend types =====
 
 pub use taceo_ark_babyjubjub::EdwardsAffine as BackendAffine;
@@ -119,6 +122,12 @@ use ark_ff::BigInteger;
 use elliptic_curve::hash2curve::{FromOkm, GroupDigest, MapToCurve};
 use taceo_ark_babyjubjub::EdwardsConfig;
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize, de::Error as _, ser::SerializeStruct as _};
+
+#[cfg(all(feature = "serde", not(feature = "std")))]
+use alloc::string::String;
+
 /// BabyJubJub curve type
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BabyJubJub;
@@ -135,6 +144,14 @@ const ORDER_HEX: &str = "060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297d
 const SCALAR_MODULUS_LE: [u8; 32] = [
     0xf1, 0x26, 0x21, 0x39, 0xdc, 0x97, 0x72, 0x67, 0x0a, 0xee, 0x20, 0x39, 0xb8, 0xed, 0x3e, 0xab,
     0x0b, 0x2b, 0x30, 0xd0, 0xb6, 0x08, 0x0a, 0x37, 0x05, 0x34, 0x26, 0x5c, 0xce, 0x89, 0x0c, 0x06,
+];
+
+/// Base field modulus in little-endian bytes.
+/// q = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+#[cfg(feature = "serde")]
+const BASE_FIELD_MODULUS_LE: [u8; 32] = [
+    0x01, 0x00, 0x00, 0xf0, 0x93, 0xf5, 0xe1, 0x43, 0x91, 0x70, 0xb9, 0x79, 0x48, 0xe8, 0x33, 0x28,
+    0x5d, 0x58, 0x81, 0x81, 0xb3, 0x5d, 0x41, 0x03, 0x8d, 0xbf, 0x3a, 0x99, 0x69, 0x1a, 0x5e, 0x30,
 ];
 
 /// BabyJubJub cofactor (the number of curve points per prime-order subgroup element).
@@ -251,6 +268,122 @@ impl AffinePoint {
         // LSB of the canonical (non-Montgomery) integer representation of x.
         let limbs = self.x.into_bigint().0;
         subtle::Choice::from((limbs[0] & 1) as u8)
+    }
+
+    /// Convert the x-coordinate to a 32-byte big-endian array.
+    #[cfg(feature = "serde")]
+    pub fn x_to_bytes(&self) -> [u8; 32] {
+        let limbs = self.x.into_bigint().0;
+        let mut arr = [0u8; 32];
+        for (i, limb) in limbs.iter().enumerate() {
+            arr[i * 8..i * 8 + 8].copy_from_slice(&limb.to_le_bytes());
+        }
+        arr.reverse();
+        arr
+    }
+
+    /// Convert the y-coordinate to a 32-byte big-endian array.
+    #[cfg(feature = "serde")]
+    pub fn y_to_bytes(&self) -> [u8; 32] {
+        let limbs = self.y.into_bigint().0;
+        let mut arr = [0u8; 32];
+        for (i, limb) in limbs.iter().enumerate() {
+            arr[i * 8..i * 8 + 8].copy_from_slice(&limb.to_le_bytes());
+        }
+        arr.reverse();
+        arr
+    }
+
+    /// Create a coordinate field element from big-endian bytes.
+    #[cfg(feature = "serde")]
+    #[allow(dead_code)]
+    fn field_from_bytes(bytes: &[u8; 32]) -> Option<BackendBaseField> {
+        let mut le = *bytes;
+        le.reverse();
+        BackendBaseField::from_le_bytes_mod_order(&le).into()
+    }
+
+    /// Helper for from_le_bytes_mod_order: returns None if bytes >= field modulus.
+    /// Since BackendBaseField::from_le_bytes_mod_order always succeeds by reducing,
+    /// we need a canonicity check.
+    #[cfg(feature = "serde")]
+    fn field_from_canonical_bytes(bytes: &[u8; 32]) -> Option<BackendBaseField> {
+        let mut le = *bytes;
+        le.reverse();
+        // Check canonicity
+        let mut borrow = 0u16;
+        for (&a, &b) in le.iter().zip(BASE_FIELD_MODULUS_LE.iter()) {
+            let diff = (a as u16).wrapping_sub(b as u16).wrapping_sub(borrow);
+            borrow = diff >> 15;
+        }
+        if borrow == 0 {
+            // le >= modulus
+            return None;
+        }
+        Some(BackendBaseField::from_le_bytes_mod_order(&le))
+    }
+}
+
+#[cfg(feature = "serde")]
+impl Serialize for AffinePoint {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            let mut state = serializer.serialize_struct("AffinePoint", 2)?;
+            state.serialize_field("x", &hex::encode(self.x_to_bytes()))?;
+            state.serialize_field("y", &hex::encode(self.y_to_bytes()))?;
+            state.end()
+        } else {
+            let mut state = serializer.serialize_struct("AffinePoint", 2)?;
+            state.serialize_field("x", &self.x_to_bytes())?;
+            state.serialize_field("y", &self.y_to_bytes())?;
+            state.end()
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for AffinePoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct AffinePointHelper<T> {
+            x: T,
+            y: T,
+        }
+
+        if deserializer.is_human_readable() {
+            let helper = AffinePointHelper::<String>::deserialize(deserializer)?;
+            let x_bytes = hex::decode(helper.x).map_err(D::Error::custom)?;
+            let y_bytes = hex::decode(helper.y).map_err(D::Error::custom)?;
+            if x_bytes.len() != 32 || y_bytes.len() != 32 {
+                return Err(D::Error::custom("invalid coordinate length"));
+            }
+            let mut x_arr = [0u8; 32];
+            let mut y_arr = [0u8; 32];
+            x_arr.copy_from_slice(&x_bytes);
+            y_arr.copy_from_slice(&y_bytes);
+            let x = Self::field_from_canonical_bytes(&x_arr)
+                .ok_or_else(|| D::Error::custom("invalid x coordinate: out of range"))?;
+            let y = Self::field_from_canonical_bytes(&y_arr)
+                .ok_or_else(|| D::Error::custom("invalid y coordinate: out of range"))?;
+            Self::new(x, y).ok_or_else(|| {
+                D::Error::custom("invalid point: not on curve or not in prime-order subgroup")
+            })
+        } else {
+            let helper = AffinePointHelper::<[u8; 32]>::deserialize(deserializer)?;
+            let x = Self::field_from_canonical_bytes(&helper.x)
+                .ok_or_else(|| D::Error::custom("invalid x coordinate: out of range"))?;
+            let y = Self::field_from_canonical_bytes(&helper.y)
+                .ok_or_else(|| D::Error::custom("invalid y coordinate: out of range"))?;
+            Self::new(x, y).ok_or_else(|| {
+                D::Error::custom("invalid point: not on curve or not in prime-order subgroup")
+            })
+        }
     }
 }
 
@@ -663,6 +796,46 @@ impl Scalar {
     }
 }
 
+#[cfg(feature = "serde")]
+impl Serialize for Scalar {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            hex::encode(self.to_bytes()).serialize(serializer)
+        } else {
+            self.to_bytes().serialize(serializer)
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for Scalar {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            let s = String::deserialize(deserializer)?;
+            let bytes = hex::decode(s).map_err(D::Error::custom)?;
+            if bytes.len() != Self::SIZE {
+                return Err(D::Error::custom("invalid scalar length"));
+            }
+            let mut arr = [0u8; Self::SIZE];
+            arr.copy_from_slice(&bytes);
+            Self::from_bytes(&arr)
+                .into_option()
+                .ok_or_else(|| D::Error::custom("invalid scalar: non-canonical or out of range"))
+        } else {
+            let bytes = <[u8; Self::SIZE]>::deserialize(deserializer)?;
+            Self::from_bytes(&bytes)
+                .into_option()
+                .ok_or_else(|| D::Error::custom("invalid scalar: non-canonical or out of range"))
+        }
+    }
+}
+
 // ===== Group trait implementations =====
 
 impl Group for ProjectivePoint {
@@ -964,12 +1137,21 @@ impl GroupDigest for BabyJubJub {
 /// trailing byte, which made the encoding non-canonical and malleable (256
 /// distinct byte strings decoded to the same point); the extra byte has been
 /// removed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct GroupRepr(pub [u8; Self::SIZE]);
 
 impl GroupRepr {
     /// Size of the canonical group encoding in bytes.
     pub const SIZE: usize = 32;
+
+    /// Clones the representation from a slice.
+    ///
+    /// Panic if the slice is not exactly 32 bytes.
+    pub fn clone_from_slice(other: &[u8]) -> Self {
+        let mut repr = Self::default();
+        repr.0.copy_from_slice(other);
+        repr
+    }
 }
 
 impl AsRef<[u8]> for GroupRepr {
