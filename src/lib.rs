@@ -829,7 +829,7 @@ const ELLIGATOR2_Z: BackendBaseField = ark_ff::MontFp!("5");
 /// associated type).
 ///
 /// This is a thin newtype around the base field `Fq` ([`BackendBaseField`]); it
-/// exists so the foreign [`Reduce`] / [`MapToCurve`](hash2curve::MapToCurve)
+/// exists so the foreign [`Reduce`] / [`MapToCurve`]
 /// traits can be implemented (the orphan rule forbids implementing them directly
 /// on the backend's `Fq`). You normally never construct this type yourself — it
 /// is produced internally while hashing.
@@ -972,7 +972,7 @@ impl MapToCurve for BabyJubJub {
 /// feature enabled you can call
 /// `BabyJubJub::hash_from_bytes(&[msg], &[dst])` directly; without it, use the
 /// expander-generic free functions in the `hash2curve` crate together with the
-/// always-available [`MapToCurve`](hash2curve::MapToCurve) impl above.
+/// always-available [`MapToCurve`] impl above.
 ///
 /// The `*_ID` constants are the (non-standard) RFC 9380 suite identifiers for
 /// this map; BabyJubJub has no registered suite, so they are provided only as
