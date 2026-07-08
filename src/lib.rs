@@ -1152,6 +1152,11 @@ impl GroupRepr {
         repr.0.copy_from_slice(other);
         repr
     }
+    
+    /// Alias for [`Self::SIZE`].
+    pub const fn len(&self) -> usize {
+        Self::SIZE
+    }
 }
 
 impl AsRef<[u8]> for GroupRepr {
