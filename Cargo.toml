@@ -1,6 +1,6 @@
 [package]
 name = "babyjubjub-ec"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 license = "GPL-3.0"
 description = "BabyJubJub elliptic curve implementation wrapped in elliptic-curve traits"
@@ -16,7 +16,7 @@ ark-ec = { version = "0.5", default-features = false }
 ark-ff = { version = "0.5", default-features = false }
 ark-serialize = { version = "0.5", default-features = false }
 # elliptic-curve traits
-elliptic-curve = { version = "0.14.0", default-features = false }
+elliptic-curve = { version = "0.14.1", default-features = false }
 # Scalar field operations
 ff = { version = "0.14", default-features = false }
 # group crate for core group traits
