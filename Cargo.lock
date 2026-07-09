@@ -188,7 +188,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "babyjubjub-ec"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "ark-ec",
  "ark-ff",
@@ -201,6 +201,8 @@ dependencies = [
  "num-traits",
  "rand 0.10.1",
  "rand_core 0.10.1",
+ "serde",
+ "serde_json",
  "subtle",
  "taceo-ark-babyjubjub",
  "zeroize",
@@ -466,6 +468,7 @@ dependencies = [
  "pkcs8",
  "rand_core 0.10.1",
  "sec1",
+ "serdect",
  "subtle",
  "zeroize",
 ]
@@ -800,6 +803,7 @@ dependencies = [
  "ctutils",
  "der",
  "hybrid-array",
+ "serdect",
  "subtle",
  "zeroize",
 ]
@@ -845,6 +849,16 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serdect"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66cf8fedced2fcf12406bcb34223dffb92eaf34908ede12fed414c82b7f00b3e"
+dependencies = [
+ "base16ct",
+ "serde",
 ]
 
 [[package]]
@@ -1002,6 +1016,7 @@ version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

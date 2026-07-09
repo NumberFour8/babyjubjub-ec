@@ -136,6 +136,30 @@ pub struct AffinePoint {
     pub y: BackendBaseField,
 }
 
+#[cfg(feature = "serde")]
+impl serde::Serialize for AffinePoint {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        ProjectivePoint::from(*self).to_bytes().serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for AffinePoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes = GroupRepr::deserialize(deserializer)?;
+        let proj = ProjectivePoint::from_bytes(&bytes);
+        Option::<ProjectivePoint>::from(proj)
+            .map(|p| AffinePoint::from(p))
+            .ok_or_else(|| serde::de::Error::custom("invalid affine point"))
+    }
+}
+
 impl AffinePoint {
     /// Additive identity of the group (point at infinity)
     pub const IDENTITY: Self = Self {
@@ -494,6 +518,28 @@ impl ProjectivePoint {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Scalar(pub BackendScalar);
 
+#[cfg(feature = "serde")]
+impl serde::Serialize for Scalar {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_bytes().serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Scalar {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes = <[u8; Self::SIZE]>::deserialize(deserializer)?;
+        Option::<Self>::from(Scalar::from_bytes(&bytes))
+            .ok_or_else(|| serde::de::Error::custom("invalid scalar"))
+    }
+}
+
 impl Scalar {
     /// Zero scalar
     pub const ZERO: Self = Self(BackendScalar::ZERO);
@@ -721,6 +767,7 @@ impl DefaultIsZeroes for ProjectivePoint {}
 /// trailing byte, which made the encoding non-canonical and malleable (256
 /// distinct byte strings decoded to the same point); the extra byte has been
 /// removed.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GroupRepr(pub [u8; Self::SIZE]);
 
